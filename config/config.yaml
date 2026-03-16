@@ -1,0 +1,8 @@
+app:
+  name: "get-link-tg-bot"
+  version: "0.0.1"
+
+telegram: 
+  bot_token: ''
+  offset: 0
+  timeout: 60

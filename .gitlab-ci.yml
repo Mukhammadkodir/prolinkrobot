@@ -1,0 +1,80 @@
+before_script:
+    ## docker login
+    - docker login --username $CI_REGISTRY_USER --password $CI_REGISTRY_PASSWORD
+
+stages:
+  - build
+  - deploy
+
+build_image_prod:
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  variables:
+    IMAGE_NAME: abdulazizkomilovuz/envato_freepik_group
+    IMAGE_TAG: $CI_PIPELINE_IID
+  stage: build
+  script:
+    - docker build -t $IMAGE_NAME:$IMAGE_TAG .
+    - docker push $IMAGE_NAME:$IMAGE_TAG
+  only:
+    - master
+
+deploy_to_prod:
+  image: docker:20.10.16
+  services:
+    - docker:20.10.16-dind
+  variables:
+    IMAGE_NAME: abdulazizkomilovuz/envato_freepik_group
+    IMAGE_TAG: $CI_PIPELINE_IID
+    DEPLOYMENT: envato_freepik_group_envato_freepik_group
+  before_script:
+    - mkdir -p ~/.ssh
+    - touch ~/.ssh/known_hosts
+    - echo ${SSH_PRIVATE_KEY} > ~/.ssh/id_rsa
+    - chmod 0400 ~/.ssh/id_rsa
+    - ssh-keyscan -t rsa $HOSTNAME >> ~/.ssh/known_hosts
+    - chmod 400 $SSH_PRIVATE_KEY
+  stage: deploy
+  script:
+    - ssh -o StrictHostKeyChecking=no -i $SSH_PRIVATE_KEY $USER@$HOSTNAME
+      "docker pull $IMAGE_NAME:$IMAGE_TAG && docker service update --image $IMAGE_NAME:$IMAGE_TAG $DEPLOYMENT"
+  only:
+    - master
+
+# build_image_test:
+#   image: docker:20.10.16
+#   services:
+#     - docker:20.10.16-dind
+#   variables:
+#     IMAGE_NAME: abdulazizkomilovuz/envato_freepik_group
+#     IMAGE_TAG: $CI_PIPELINE_IID
+#   stage: build
+#   script:
+#     - docker build -t $IMAGE_NAME:$IMAGE_TAG .
+#     - docker push $IMAGE_NAME:$IMAGE_TAG
+#   only:
+#     - test
+
+# deploy_to_test:
+#   image: docker:20.10.16
+#   services:
+#     - docker:20.10.16-dind
+#   variables:
+#     IMAGE_NAME: abdulazizkomilovuz/envato_freepik_group
+#     IMAGE_TAG: $CI_PIPELINE_IID
+#     DEPLOYMENT: telegram_bot_test
+#   before_script:
+#     - mkdir -p ~/.ssh
+#     - touch ~/.ssh/known_hosts
+#     - echo "${TEST_SSH_PRIVATE_KEY}" > ~/.ssh/id_rsa
+#     - chmod 0400 ~/.ssh/id_rsa
+#     - ssh-keyscan -t rsa $TEST_HOSTNAME >> ~/.ssh/known_hosts
+#     - chmod 400 $TEST_SSH_PRIVATE_KEY
+#   stage: deploy
+#   script:
+#     - ssh -o StrictHostKeyChecking=no -i $TEST_SSH_PRIVATE_KEY $USER@$TEST_HOSTNAME
+#       "docker pull $IMAGE_NAME:$IMAGE_TAG && docker service update --image $IMAGE_NAME:$IMAGE_TAG $DEPLOYMENT"
+#   only:
+#     - test
+

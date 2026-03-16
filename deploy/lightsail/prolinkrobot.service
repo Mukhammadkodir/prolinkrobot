@@ -1,0 +1,23 @@
+[Unit]
+Description=Prolinkrobot Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__APP_USER__
+Group=__APP_USER__
+WorkingDirectory=__APP_DIR__/shared
+EnvironmentFile=__APP_DIR__/shared/.env
+ExecStart=__APP_DIR__/current/prolinkrobot
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=__APP_DIR__/shared __APP_DIR__/releases
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
