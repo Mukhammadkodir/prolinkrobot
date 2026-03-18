@@ -3,6 +3,8 @@ package telegram
 import (
 	"net/http"
 	"testing"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 func TestCacheFilenamePrefersQueryFilename(t *testing.T) {
@@ -51,5 +53,27 @@ func TestIsCacheUploadTooLarge(t *testing.T) {
 	}
 	if isCacheUploadTooLarge(10, 0) {
 		t.Fatal("expected disabled limit to pass")
+	}
+}
+
+func TestNewCacheDocumentConfigDisablesContentTypeDetectionForVideo(t *testing.T) {
+	msg := newCacheDocumentConfig(123, tgbotapi.FilePath("/tmp/test.mp4"), shouldDisableContentTypeDetection("video"))
+	if !msg.DisableContentTypeDetection {
+		t.Fatal("expected DisableContentTypeDetection to be enabled for video cache uploads")
+	}
+	if !msg.DisableNotification {
+		t.Fatal("expected DisableNotification to stay enabled for cache uploads")
+	}
+}
+
+func TestShouldDisableContentTypeDetection(t *testing.T) {
+	if !shouldDisableContentTypeDetection("video") {
+		t.Fatal("expected video uploads to disable content type detection")
+	}
+	if !shouldDisableContentTypeDetection("icon") {
+		t.Fatal("expected icon uploads to disable content type detection")
+	}
+	if shouldDisableContentTypeDetection("regular") {
+		t.Fatal("expected regular uploads to keep default content type detection")
 	}
 }

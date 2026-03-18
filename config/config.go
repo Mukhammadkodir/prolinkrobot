@@ -29,9 +29,11 @@ type App struct {
 }
 
 type Telegram struct {
-	BotToken string `yaml:"bot_token" env:"BOT_TOKEN"`
-	Offset   int    `yaml:"offset" env:"OFFSET"`
-	Timeout  int    `yaml:"timeout" env:"TIMEOUT"`
+	BotToken         string `yaml:"bot_token" env:"BOT_TOKEN"`
+	Offset           int    `yaml:"offset" env:"OFFSET"`
+	Timeout          int    `yaml:"timeout" env:"TIMEOUT"`
+	APIEndpoint      string `env:"TELEGRAM_API_ENDPOINT"`
+	CacheAPIEndpoint string `env:"TELEGRAM_CACHE_API_ENDPOINT"`
 }
 
 type Mongo struct {
@@ -88,9 +90,11 @@ func NewConfig() (cfg *Config, err error) {
 	}
 
 	cfg.Telegram = Telegram{
-		BotToken: botToken,
-		Offset:   envInt("OFFSET", 0),
-		Timeout:  envInt("TIMEOUT", 60),
+		BotToken:         botToken,
+		Offset:           envInt("OFFSET", 0),
+		Timeout:          envInt("TIMEOUT", 60),
+		APIEndpoint:      envString("TELEGRAM_API_ENDPOINT", ""),
+		CacheAPIEndpoint: envString("TELEGRAM_CACHE_API_ENDPOINT", ""),
 	}
 
 	cfg.Mongo = Mongo{

@@ -43,6 +43,21 @@ func TestExtractDownloadURLRejectsPreviewOnlyVideo(t *testing.T) {
 	}
 }
 
+func TestExtractDownloadURLAcceptsGettyVideoURL(t *testing.T) {
+	body := []byte(`{
+		"filename":"825156360_Horizontal_Abstract_3840x2160.mov",
+		"url":"https://delivery.gettyimages.com/downloads/825156360?k=20&e=abc"
+	}`)
+
+	got, err := extractDownloadURL(body, "video-detail-option")
+	if err != nil {
+		t.Fatalf("extractDownloadURL returned error: %v", err)
+	}
+	if !strings.Contains(got, "delivery.gettyimages.com/downloads/825156360") {
+		t.Fatalf("unexpected getty url: %q", got)
+	}
+}
+
 func TestExtractEmbeddedVideoOptionIDs(t *testing.T) {
 	body := []byte(`{
 		"optionId":100,
@@ -95,6 +110,104 @@ func TestBuildDownloadEndpointsPrioritizesLocaleForRegularAssets(t *testing.T) {
 	}
 	if got[0].label != "regular-contentType-locale" {
 		t.Fatalf("expected locale-aware contentType candidate first, got %q", got[0].label)
+	}
+}
+
+func TestGetDownloadLinkFreepikVideoUsesDetailEndpoint(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/api/video/3898315/download" {
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+			}
+			if got := req.URL.Query().Get("optionId"); got != "19716632" {
+				t.Fatalf("expected optionId=19716632, got %q", got)
+			}
+			if got := req.URL.Query().Get("orientation"); got != "horizontal" {
+				t.Fatalf("expected orientation=horizontal, got %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"url":"https://videocdn.cdnpk.net/videos/x/horizontal/downloads/original.mov?filename=test.mov&token=1"
+				}`)),
+				Request: req,
+			}, nil
+		}),
+	}
+
+	normalized, err := url.Parse("https://www.freepik.com/free-video/abstract-geometric-background_3898315")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	pageData := &assetPageData{
+		Video: &videoPageData{
+			ID:          3898315,
+			Orientation: "horizontal",
+			Options: []videoOption{
+				{ID: 19716632, IsOriginal: true, Container: "mov", Width: 3840, Height: 2160, Active: true},
+			},
+		},
+	}
+
+	got, err := getDownloadLinkFreepikVideo(client, normalized, "3898315", pageData, "GR_TOKEN=test", "", "", "token")
+	if err != nil {
+		t.Fatalf("getDownloadLinkFreepikVideo returned error: %v", err)
+	}
+
+	want := "https://videocdn.cdnpk.net/videos/x/horizontal/downloads/original.mov?filename=test.mov&token=1"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
+func TestBestVideoCacheOptionIDsPrefersLargestVariantWithinLimit(t *testing.T) {
+	pageData := &assetPageData{
+		Video: &videoPageData{
+			Options: []videoOption{
+				{ID: 19716632, IsOriginal: true, Container: "mov", Width: 3840, Height: 2160, Active: true, Size: 212},
+				{ID: 19716633, IsOriginal: false, Container: "mp4", Width: 3840, Height: 2160, Active: true, Size: 30},
+				{ID: 19716634, IsOriginal: false, Container: "mp4", Width: 1920, Height: 1080, Active: true, Size: 13},
+				{ID: 19716635, IsOriginal: false, Container: "mp4", Width: 1280, Height: 720, Active: true, Size: 6},
+			},
+		},
+	}
+
+	got := pageData.bestVideoCacheOptionIDs("3898315", 50*1024*1024)
+	if len(got) == 0 {
+		t.Fatalf("expected cacheable options")
+	}
+	if got[0] != "19716633" {
+		t.Fatalf("expected 4k mp4 option first, got %v", got)
+	}
+	for _, id := range got {
+		if id == "19716632" {
+			t.Fatalf("expected oversized original mov to be excluded, got %v", got)
+		}
+	}
+}
+
+func TestBestVideoCacheOptionIDsExcludesGIFVariants(t *testing.T) {
+	pageData := &assetPageData{
+		Video: &videoPageData{
+			Options: []videoOption{
+				{ID: 1, Container: "gif", Width: 640, Height: 360, Active: true, Size: 3},
+				{ID: 2, Container: "mp4", Width: 640, Height: 360, Active: true, Size: 4},
+			},
+		},
+	}
+
+	got := pageData.bestVideoCacheOptionIDs("3898315", 50*1024*1024)
+	if len(got) == 0 {
+		t.Fatalf("expected cacheable options")
+	}
+	if got[0] != "2" {
+		t.Fatalf("expected mp4 option first, got %v", got)
+	}
+	for _, id := range got {
+		if id == "1" {
+			t.Fatalf("expected gif option to be excluded, got %v", got)
+		}
 	}
 }
 

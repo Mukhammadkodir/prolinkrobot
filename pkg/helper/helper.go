@@ -70,13 +70,14 @@ type iconThumbnailSet struct {
 }
 
 type videoPageData struct {
-	ID        int           `json:"id"`
-	Premium   bool          `json:"premium"`
-	VideoSrc  string        `json:"videoSrc"`
-	Previews  []mediaURL    `json:"previews"`
-	Options   []videoOption `json:"options"`
-	URLs      []string
-	OptionIDs []string
+	ID          int           `json:"id"`
+	Premium     bool          `json:"premium"`
+	Orientation string        `json:"orientation"`
+	VideoSrc    string        `json:"videoSrc"`
+	Previews    []mediaURL    `json:"previews"`
+	Options     []videoOption `json:"options"`
+	URLs        []string
+	OptionIDs   []string
 }
 
 type mediaURL struct {
@@ -92,6 +93,7 @@ type videoOption struct {
 	Container  string `json:"container"`
 	Width      int    `json:"width"`
 	Height     int    `json:"height"`
+	Size       int    `json:"size"`
 }
 
 type FreepikAuthStatus struct {
@@ -162,7 +164,7 @@ func GetDownloadLinkFreepik(link string) (string, error) {
 	client := &http.Client{Timeout: 30 * time.Second}
 	assetType := detectAssetTypeFromPath(strings.ToLower(normalized.Path))
 	var pageData *assetPageData
-	if assetType == "icon" {
+	if assetType == "icon" || assetType == "video" {
 		pageData, _ = fetchAssetPageData(client, normalized, cookieHeader, cookieSource)
 	}
 
@@ -172,7 +174,7 @@ func GetDownloadLinkFreepik(link string) (string, error) {
 		}
 	}
 	if assetType == "video" {
-		return getDownloadLinkFreepikVideo(client, normalized, resourceID, cookieHeader, cookieSource, csrf, authToken)
+		return getDownloadLinkFreepikVideo(client, normalized, resourceID, pageData, cookieHeader, cookieSource, csrf, authToken)
 	}
 
 	candidates := buildDownloadEndpoints(normalized, resourceID, pageData)
@@ -192,6 +194,49 @@ func GetDownloadLinkFreepik(link string) (string, error) {
 	}
 
 	return "", errs.New(strings.Join(failures, " | "))
+}
+
+func GetCacheableVideoDownloadLinkFreepik(link string, maxBytes int64) (string, error) {
+	normalized, err := normalizeFreepikURL(link)
+	if err != nil {
+		return "", errs.Wrap(&err, "normalizeFreepikURL")
+	}
+
+	resourceID, err := extractResourceID(normalized)
+	if err != nil {
+		return "", errs.Wrap(&err, "extractResourceID")
+	}
+
+	cookieHeader, cookieSource, err := loadCookieHeaderWithSource()
+	if err != nil {
+		return "", errs.Wrap(&err, "loadCookieHeader")
+	}
+
+	csrf := strings.TrimSpace(os.Getenv("FREEPIK_CSRF_TOKEN"))
+	if csrf == "" {
+		csrf = getCookieValue(cookieHeader, "csrf_freepik")
+	}
+	if csrf == "" {
+		csrf = getCookieValue(cookieHeader, "csrftoken")
+	}
+
+	authToken := strings.TrimSpace(os.Getenv("FREEPIK_BEARER_TOKEN"))
+	if authToken == "" {
+		authToken = getCookieValue(cookieHeader, "GR_TOKEN")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	pageData, err := fetchAssetPageData(client, normalized, cookieHeader, cookieSource)
+	if err != nil {
+		return "", errs.Wrap(&err, "fetchAssetPageData")
+	}
+
+	optionIDs := pageData.bestVideoCacheOptionIDs(resourceID, maxBytes)
+	if len(optionIDs) == 0 {
+		return "", errs.New("no cacheable video option fits the configured size limit")
+	}
+
+	return getDownloadLinkFreepikVideoWithOptionIDs(client, normalized, resourceID, pageData, optionIDs, false, cookieHeader, cookieSource, csrf, authToken)
 }
 
 func GetDownloadLinkFreepikFreePsd(orgLink string) (string, error) {
@@ -558,12 +603,13 @@ func fetchAssetPageData(client *http.Client, pageURL *url.URL, cookieHeader, coo
 		var payload struct {
 			Props struct {
 				PageProps struct {
-					Icon     *iconPageData `json:"icon"`
-					ID       int           `json:"id"`
-					Premium  bool          `json:"premium"`
-					VideoSrc string        `json:"videoSrc"`
-					Previews []mediaURL    `json:"previews"`
-					Options  []videoOption `json:"options"`
+					Icon        *iconPageData `json:"icon"`
+					ID          int           `json:"id"`
+					Premium     bool          `json:"premium"`
+					Orientation string        `json:"orientation"`
+					VideoSrc    string        `json:"videoSrc"`
+					Previews    []mediaURL    `json:"previews"`
+					Options     []videoOption `json:"options"`
 				} `json:"pageProps"`
 			} `json:"props"`
 		}
@@ -574,13 +620,14 @@ func fetchAssetPageData(client *http.Client, pageURL *url.URL, cookieHeader, coo
 			}
 			if pageProps.ID != 0 || pageProps.VideoSrc != "" || len(pageProps.Previews) > 0 || len(pageProps.Options) > 0 {
 				data.Video = &videoPageData{
-					ID:        pageProps.ID,
-					Premium:   pageProps.Premium,
-					VideoSrc:  pageProps.VideoSrc,
-					Previews:  pageProps.Previews,
-					Options:   pageProps.Options,
-					URLs:      nil,
-					OptionIDs: nil,
+					ID:          pageProps.ID,
+					Premium:     pageProps.Premium,
+					Orientation: pageProps.Orientation,
+					VideoSrc:    pageProps.VideoSrc,
+					Previews:    pageProps.Previews,
+					Options:     pageProps.Options,
+					URLs:        nil,
+					OptionIDs:   nil,
 				}
 			}
 		}
@@ -732,6 +779,77 @@ func (d *assetPageData) bestVideoOptionIDs(resourceID string) []string {
 	}
 
 	return ordered
+}
+
+func (d *assetPageData) bestVideoCacheOptionIDs(resourceID string, maxBytes int64) []string {
+	if d == nil || d.Video == nil {
+		return nil
+	}
+	if maxBytes <= 0 {
+		return d.bestVideoOptionIDs(resourceID)
+	}
+
+	type scoredID struct {
+		id    string
+		score int
+	}
+
+	scored := make([]scoredID, 0, len(d.Video.Options))
+	for _, option := range d.Video.Options {
+		if option.ID == 0 || fmt.Sprintf("%d", option.ID) == resourceID {
+			continue
+		}
+		if !isCacheableVideoContainer(option.Container) {
+			continue
+		}
+		if est := optionEstimatedBytes(option); est > 0 && est > maxBytes {
+			continue
+		}
+
+		score := option.Width * option.Height
+		if option.Active {
+			score += 500_000
+		}
+		if option.IsOriginal {
+			score += 200_000
+		}
+		if strings.EqualFold(option.Container, "mp4") {
+			score += 150_000
+		}
+		if strings.EqualFold(option.Container, "mov") {
+			score += 100_000
+		}
+		scored = append(scored, scoredID{
+			id:    fmt.Sprintf("%d", option.ID),
+			score: score,
+		})
+	}
+
+	sort.SliceStable(scored, func(i, j int) bool {
+		return scored[i].score > scored[j].score
+	})
+
+	ordered := make([]string, 0, len(scored))
+	for _, item := range scored {
+		ordered = append(ordered, item.id)
+	}
+	return appendUniqueStrings(nil, ordered...)
+}
+
+func isCacheableVideoContainer(container string) bool {
+	switch strings.ToLower(strings.TrimSpace(container)) {
+	case "", "mp4", "mov", "webm", "avi", "zip":
+		return true
+	default:
+		return false
+	}
+}
+
+func optionEstimatedBytes(option videoOption) int64 {
+	if option.Size <= 0 {
+		return 0
+	}
+	return int64(option.Size) * 1024 * 1024
 }
 
 func loadCookieHeader() (string, error) {
@@ -1148,94 +1266,75 @@ func isAuthMissingOrExpired(cookieMap map[string]string) bool {
 	return isJWTExpired(token)
 }
 
-func getDownloadLinkFreepikVideo(client *http.Client, normalized *url.URL, optionID, cookieHeader, cookieSource, csrf, authToken string) (string, error) {
+func getDownloadLinkFreepikVideo(client *http.Client, normalized *url.URL, videoID string, pageData *assetPageData, cookieHeader, cookieSource, csrf, authToken string) (string, error) {
+	optionIDs := pageData.bestVideoOptionIDs(videoID)
+	return getDownloadLinkFreepikVideoWithOptionIDs(client, normalized, videoID, pageData, optionIDs, true, cookieHeader, cookieSource, csrf, authToken)
+}
+
+func getDownloadLinkFreepikVideoWithOptionIDs(client *http.Client, normalized *url.URL, videoID string, pageData *assetPageData, optionIDs []string, includeDefault bool, cookieHeader, cookieSource, csrf, authToken string) (string, error) {
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
+	if normalized == nil {
+		return "", errs.New("video url is nil")
+	}
 
 	hosts := []string{}
-	if mapped := legacyVideoLocale(normalized.String()); mapped != "" {
-		hosts = append(hosts, mapped+".freepik.com")
-	}
-	if normalized != nil && normalized.Host != "" {
+	if normalized.Host != "" {
 		hosts = append(hosts, normalized.Host)
+	}
+	if normalized.Host != "www.freepik.com" {
+		hosts = append(hosts, "www.freepik.com")
 	}
 	hosts = appendUniqueStrings(nil, hosts...)
 
-	type responsePayload struct {
-		URL string `json:"url"`
+	orientation := ""
+	if pageData != nil && pageData.Video != nil {
+		orientation = strings.TrimSpace(pageData.Video.Orientation)
 	}
 
-	failures := make([]string, 0, len(hosts))
+	failures := make([]string, 0, len(hosts)*4)
 	for _, host := range hosts {
-		endpoint := fmt.Sprintf("https://%s/api/video/download?optionId=%s", host, optionID)
-		req, err := http.NewRequest(http.MethodGet, endpoint, nil)
-		if err != nil {
-			return "", errs.Wrap(&err, "http.NewRequest")
+		base := fmt.Sprintf("https://%s/api/video/%s/download", host, videoID)
+		candidates := make([]endpointCandidate, 0, len(optionIDs)*2+2)
+		for _, optionID := range optionIDs {
+			if optionID == "" {
+				continue
+			}
+			if orientation != "" {
+				candidates = append(candidates, endpointCandidate{
+					label: fmt.Sprintf("video-detail-orientation-option[%s@%s]", optionID, host),
+					url:   fmt.Sprintf("%s?orientation=%s&optionId=%s", base, url.QueryEscape(orientation), url.QueryEscape(optionID)),
+				})
+			}
+			candidates = append(candidates, endpointCandidate{
+				label: fmt.Sprintf("video-detail-option[%s@%s]", optionID, host),
+				url:   fmt.Sprintf("%s?optionId=%s", base, url.QueryEscape(optionID)),
+			})
+		}
+		if includeDefault {
+			if orientation != "" {
+				candidates = append(candidates, endpointCandidate{
+					label: fmt.Sprintf("video-detail-orientation[%s]", host),
+					url:   fmt.Sprintf("%s?orientation=%s", base, url.QueryEscape(orientation)),
+				})
+			}
+			candidates = append(candidates, endpointCandidate{
+				label: fmt.Sprintf("video-detail-default[%s]", host),
+				url:   base,
+			})
 		}
 
-		req.Header.Set("Accept", "*/*")
-		req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-		req.Header.Set("Accept-Language", "ru")
-		req.Header.Set("Connection", "keep-alive")
-		req.Header.Set("Cookie", cookieHeader)
-		req.Header.Set("Host", host)
-		req.Header.Set("Priority", "u=3, i")
-		req.Header.Set("Referer", normalized.String())
-		req.Header.Set("Sec-Fetch-Dest", "empty")
-		req.Header.Set("Sec-Fetch-Mode", "cors")
-		req.Header.Set("Sec-Fetch-Site", "same-origin")
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-		req.Header.Set("x-requested-with", "XMLHttpRequest")
-		if csrf != "" {
-			req.Header.Set("x-csrf-token", csrf)
-			req.Header.Set("x-csrftoken", csrf)
+		for _, candidate := range uniqueCandidates(candidates) {
+			downloadURL, statusCode, body, reqErr := executeDownloadRequest(client, candidate.label, candidate.url, normalized.String(), cookieHeader, cookieSource, csrf, authToken)
+			if reqErr == nil && downloadURL != "" {
+				return downloadURL, nil
+			}
+			failures = append(failures, fmt.Sprintf("%s -> %s", candidate.label, summarizeResponseError(statusCode, body, reqErr)))
 		}
-		if authToken != "" {
-			req.Header.Set("Authorization", "Bearer "+authToken)
-		}
-
-		resp, err := client.Do(req)
-		if err != nil {
-			failures = append(failures, fmt.Sprintf("%s -> %s", host, err.Error()))
-			continue
-		}
-
-		if persistErr := persistAuthCookiesFromResponse(cookieSource, resp.Cookies()); persistErr != nil {
-			log.Printf("persist video auth cookies failed: %v", persistErr)
-		}
-
-		body, readErr := readResponseBody(resp)
-		resp.Body.Close()
-		if readErr != nil {
-			failures = append(failures, fmt.Sprintf("%s -> %s", host, readErr.Error()))
-			continue
-		}
-
-		payload := &responsePayload{}
-		if err := json.Unmarshal(body, payload); err != nil {
-			failures = append(failures, fmt.Sprintf("%s -> %s", host, summarizeResponseError(resp.StatusCode, body, err)))
-			continue
-		}
-		if resp.StatusCode < 300 && strings.TrimSpace(payload.URL) != "" {
-			return strings.TrimSpace(payload.URL), nil
-		}
-
-		failures = append(failures, fmt.Sprintf("%s -> %s", host, summarizeResponseError(resp.StatusCode, body, nil)))
 	}
 
 	return "", errs.New(strings.Join(failures, " | "))
-}
-
-func legacyVideoLocale(rawURL string) string {
-	lang := strings.TrimSpace(GetLanguageFreepik(rawURL))
-	if lang == "" {
-		return ""
-	}
-	if mapped, ok := legacyVideoLocaleMap[lang]; ok {
-		return mapped
-	}
-	return lang
 }
 
 func readResponseBody(resp *http.Response) ([]byte, error) {
@@ -1427,7 +1526,7 @@ func scoreCandidateURL(raw, context string) int {
 
 	host := strings.ToLower(parsed.Hostname())
 	urlPath := strings.ToLower(parsed.Path)
-	ext := strings.ToLower(pathpkg.Ext(urlPath))
+	ext := effectiveDownloadExtension(parsed)
 	kind := responseContextKind(context)
 
 	score := 0
@@ -1439,6 +1538,8 @@ func scoreCandidateURL(raw, context string) int {
 	case strings.Contains(host, "downloadscdn"):
 		score += 5000
 	case strings.Contains(host, "videocdn.cdnpk.net"):
+		score += 5000
+	case strings.Contains(host, "gettyimages.com"):
 		score += 5000
 	case strings.Contains(host, "audiocdn.cdnpk.net"):
 		score += 4500
@@ -1652,12 +1753,13 @@ func looksLikeDownloadURL(raw string) bool {
 	if strings.Contains(urlPath, "/api/") {
 		return false
 	}
-
 	switch {
 	case strings.Contains(host, "downloadscdn"):
 		return true
 	case strings.Contains(host, "videocdn.cdnpk.net"):
 		return isActualVideoDownloadPath(urlPath)
+	case strings.Contains(host, "gettyimages.com"):
+		return strings.Contains(urlPath, "/downloads/")
 	case strings.Contains(host, "audiocdn.cdnpk.net"):
 		return true
 	case strings.Contains(host, "3d.cdnpk.net"):
@@ -1679,13 +1781,39 @@ func isActualVideoDownloadURL(raw string) bool {
 
 	host := strings.ToLower(parsed.Hostname())
 	urlPath := strings.ToLower(parsed.Path)
+	ext := effectiveDownloadExtension(parsed)
 
 	switch {
 	case strings.Contains(host, "videocdn.cdnpk.net"):
 		return isActualVideoDownloadPath(urlPath)
 	case strings.Contains(host, "downloadscdn"):
-		return strings.HasSuffix(urlPath, ".mp4") || strings.HasSuffix(urlPath, ".mov") || strings.HasSuffix(urlPath, ".webm") || strings.HasSuffix(urlPath, ".avi") || strings.HasSuffix(urlPath, ".zip")
+		return isDownloadableVideoExtension(ext)
+	case strings.Contains(host, "gettyimages.com"):
+		return strings.Contains(urlPath, "/downloads/")
 	case strings.Contains(host, "freepik.com") && strings.Contains(urlPath, "/download/"):
+		return true
+	default:
+		return false
+	}
+}
+
+func effectiveDownloadExtension(parsed *url.URL) string {
+	if parsed == nil {
+		return ""
+	}
+	if ext := strings.ToLower(pathpkg.Ext(parsed.Path)); ext != "" {
+		return ext
+	}
+	filename := strings.TrimSpace(parsed.Query().Get("filename"))
+	if filename == "" {
+		return ""
+	}
+	return strings.ToLower(pathpkg.Ext(filename))
+}
+
+func isDownloadableVideoExtension(ext string) bool {
+	switch strings.ToLower(strings.TrimSpace(ext)) {
+	case ".mp4", ".mov", ".webm", ".avi", ".zip":
 		return true
 	default:
 		return false

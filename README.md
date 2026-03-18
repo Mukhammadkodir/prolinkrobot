@@ -33,9 +33,11 @@ Recommended deployment target: Ubuntu Lightsail instance with `systemd`.
 What is included:
 
 1. `deploy/lightsail/prolinkrobot.service`
-2. `deploy/lightsail/install-server.sh`
-3. `scripts/package_lightsail.sh`
-4. `scripts/deploy_lightsail.sh`
+2. `deploy/lightsail/prolinkrobot-telegram-bot-api.service`
+3. `deploy/lightsail/install-server.sh`
+4. `deploy/lightsail/install-telegram-bot-api.sh`
+5. `scripts/package_lightsail.sh`
+6. `scripts/deploy_lightsail.sh`
 
 ### Build deployment archive locally
 
@@ -79,12 +81,46 @@ The service will use:
 2. Env file: `/opt/prolinkrobot/shared/.env`
 3. Cookies file: `/opt/prolinkrobot/shared/freepik_cookies.json`
 
+### Local Telegram Bot API server
+
+Use this when you want cache uploads larger than the default Telegram Bot API limit.
+
+Required env values in `/opt/prolinkrobot/shared/.env`:
+
+```bash
+TELEGRAM_LOCAL_API_ENABLED=1
+TELEGRAM_LOCAL_API_ID=your_api_id
+TELEGRAM_LOCAL_API_HASH=your_api_hash
+TELEGRAM_LOCAL_API_PORT=8081
+TELEGRAM_LOCAL_API_HTTP_IP=127.0.0.1
+```
+
+Supported full-switch mode:
+
+```bash
+TELEGRAM_API_ENDPOINT=http://127.0.0.1:8081/bot%s/%s
+```
+
+Pragmatic cache-upload-only mode:
+
+```bash
+TELEGRAM_CACHE_API_ENDPOINT=http://127.0.0.1:8081/bot%s/%s
+```
+
+Notes:
+
+1. `TELEGRAM_API_ENDPOINT` is the officially supported direction because Telegram documents local Bot API usage as a full endpoint replacement.
+2. `TELEGRAM_CACHE_API_ENDPOINT` keeps user-facing traffic on the default Telegram API and sends only cache uploads through the local server.
+3. To build the local server, the deploy script uses the official [`tdlib/telegram-bot-api`](https://github.com/tdlib/telegram-bot-api) source code and requires `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
+
 ### Service commands
 
 ```bash
 sudo systemctl restart prolinkrobot
 sudo systemctl status prolinkrobot
 sudo journalctl -u prolinkrobot -f
+sudo systemctl status prolinkrobot-telegram-bot-api
+sudo journalctl -u prolinkrobot-telegram-bot-api -f
 ```
 
 ## Notes

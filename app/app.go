@@ -7,6 +7,7 @@ import (
 	"get-link-tg-bot/telegram"
 	"get-link-tg-bot/usecase"
 	"get-link-tg-bot/usecase/cases"
+	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/sulton0011/errs"
@@ -50,11 +51,30 @@ func (a *app) UsecaseUsers() {
 }
 
 func (a *app) TelegramBot() error {
-	bot, err := tgbotapi.NewBotAPI(a.cfg.Telegram.BotToken)
+	bot, err := newBotAPI(a.cfg.Telegram.BotToken, a.cfg.Telegram.APIEndpoint)
 	if err != nil {
 		return errs.Wrap(&err, "tgbotapi.NewBotAPI")
 	}
 
-	a.telegramBot = telegram.NewTgBot(a.cfg, bot, a.usecaseUsers)
+	cacheBot := bot
+	if cacheEndpoint := strings.TrimSpace(a.cfg.Telegram.CacheAPIEndpoint); cacheEndpoint != "" && cacheEndpoint != strings.TrimSpace(a.cfg.Telegram.APIEndpoint) {
+		cacheBot, err = newBotAPI(a.cfg.Telegram.BotToken, cacheEndpoint)
+		if err != nil {
+			return errs.Wrap(&err, "tgbotapi.NewBotAPIWithAPIEndpoint(cache)")
+		}
+	}
+
+	a.telegramBot = telegram.NewTgBot(a.cfg, bot, cacheBot, a.usecaseUsers)
 	return nil
+}
+
+func newBotAPI(token, endpoint string) (*tgbotapi.BotAPI, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return tgbotapi.NewBotAPI(token)
+	}
+	if strings.Count(endpoint, "%s") != 2 {
+		return nil, errs.New("telegram api endpoint must contain exactly two %s placeholders")
+	}
+	return tgbotapi.NewBotAPIWithAPIEndpoint(token, endpoint)
 }

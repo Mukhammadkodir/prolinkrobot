@@ -7,6 +7,7 @@ import (
 	"get-link-tg-bot/config"
 	"get-link-tg-bot/messages"
 	"get-link-tg-bot/models"
+	"get-link-tg-bot/pkg/helper"
 	"get-link-tg-bot/usecase"
 	"io"
 	"log"
@@ -77,6 +78,7 @@ type autoCacheJob struct {
 type TgBot struct {
 	cfg                *config.Config
 	bot                *tgbotapi.BotAPI
+	cacheBot           *tgbotapi.BotAPI
 	usecase            usecase.UsecaseUsersI
 	location           *time.Location
 	processingMu       sync.Mutex
@@ -94,14 +96,18 @@ type TgBot struct {
 	cacheJobKeys       map[string]struct{}
 }
 
-func NewTgBot(cfg *config.Config, bot *tgbotapi.BotAPI, usecase usecase.UsecaseUsersI) *TgBot {
+func NewTgBot(cfg *config.Config, bot, cacheBot *tgbotapi.BotAPI, usecase usecase.UsecaseUsersI) *TgBot {
 	location, err := time.LoadLocation(cfg.Limits.Timezone)
 	if err != nil {
 		location = time.FixedZone("Asia/Tashkent", 5*60*60)
 	}
+	if cacheBot == nil {
+		cacheBot = bot
+	}
 	tg := &TgBot{
 		cfg:                cfg,
 		bot:                bot,
+		cacheBot:           cacheBot,
 		usecase:            usecase,
 		location:           location,
 		processingMessages: make(map[string]struct{}),
@@ -114,6 +120,13 @@ func NewTgBot(cfg *config.Config, bot *tgbotapi.BotAPI, usecase usecase.UsecaseU
 	tg.startUpdateWorkers()
 	tg.startCacheWorkers()
 	return tg
+}
+
+func (tg *TgBot) cacheAPI() *tgbotapi.BotAPI {
+	if tg.cacheBot != nil {
+		return tg.cacheBot
+	}
+	return tg.bot
 }
 
 func (tg *TgBot) Read() {
@@ -263,7 +276,7 @@ func (tg *TgBot) processAutoCacheDownloadedAsset(job autoCacheJob) {
 		return
 	}
 
-	sent, err := tg.sendCacheDocument(job.DownloadLink, job.AssetType)
+	sent, err := tg.sendCacheDocument(job.SourceURL, job.DownloadLink, job.AssetType)
 	if err != nil {
 		log.Printf("auto cache send failed for key=%s type=%s link=%s: %v", job.CacheKey, job.AssetType, summarizeURLHost(job.DownloadLink), err)
 		return
@@ -271,7 +284,7 @@ func (tg *TgBot) processAutoCacheDownloadedAsset(job autoCacheJob) {
 
 	if err := tg.usecase.SaveCachedAsset(job.CacheKey, normalizeURLForCache(job.SourceURL), tg.cfg.Cache.ChannelID, sent.MessageID, job.AssetType); err != nil {
 		log.Printf("auto cache save failed for key=%s: %v", job.CacheKey, err)
-		if _, deleteErr := tg.bot.Request(tgbotapi.NewDeleteMessage(tg.cfg.Cache.ChannelID, sent.MessageID)); deleteErr != nil {
+		if _, deleteErr := tg.cacheAPI().Request(tgbotapi.NewDeleteMessage(tg.cfg.Cache.ChannelID, sent.MessageID)); deleteErr != nil {
 			log.Printf("auto cache cleanup failed for key=%s message_id=%d: %v", job.CacheKey, sent.MessageID, deleteErr)
 		}
 	}
@@ -832,30 +845,6 @@ func (tg *TgBot) handleRegularMessage(update tgbotapi.Update) {
 	botURL := tg.botPublicURL()
 	limitText := messages.BuildLimitOnlyText(lang, attempt.DownloadsToday, attempt.DailyLimit)
 
-	if assetType == "video" && isDirectVideoURL(downloadLink) {
-		if err := tg.sendVideoDocument(message.Chat.ID, downloadLink); err != nil {
-			log.Printf("send video document failed: %v", err)
-			if rollbackErr := tg.usecase.DecrementDownload(userID); rollbackErr != nil {
-				log.Printf("rollback video document failed: %v", rollbackErr)
-			}
-			if editErr := tg.editMessage(message.Chat.ID, processingMsg.MessageID, messages.GetText(lang, "error"), true, nil); editErr != nil {
-				log.Printf("edit video send error failed: %v", editErr)
-			}
-			return
-		}
-
-		videoText := messages.BuildVideoDeliveredMessageHTML(
-			lang,
-			limitText,
-			defaultSupportURL,
-			botURL,
-		)
-		if err := tg.editHTMLMessage(message.Chat.ID, processingMsg.MessageID, videoText); err != nil {
-			log.Printf("edit video success message failed: %v", err)
-		}
-		return
-	}
-
 	shareText := messages.BuildSuccessMessage(
 		lang,
 		downloadLink,
@@ -982,7 +971,7 @@ func (tg *TgBot) handleAdminCacheFileMessage(update tgbotapi.Update, lang string
 
 	copyCfg := tgbotapi.NewCopyMessage(tg.cfg.Cache.ChannelID, message.Chat.ID, message.MessageID)
 	copyCfg.DisableNotification = true
-	copied, err := tg.bot.CopyMessage(copyCfg)
+	copied, err := tg.cacheAPI().CopyMessage(copyCfg)
 	if err != nil {
 		tg.prependPendingCacheLink(userID, item)
 		tg.sendText(message.Chat.ID, lang, "❌ Failed to copy file to cache channel: "+err.Error(), 0)
@@ -1149,28 +1138,58 @@ func (tg *TgBot) getCopyLink(token string) (string, bool) {
 }
 
 func (tg *TgBot) sendVideoDocument(chatID int64, fileURL string) error {
-	msg := tgbotapi.NewDocument(chatID, tgbotapi.FileURL(fileURL))
+	msg := newCacheDocumentConfig(chatID, tgbotapi.FileURL(fileURL), true)
 	_, err := tg.bot.Send(msg)
 	return err
 }
 
-func (tg *TgBot) sendCacheDocument(downloadLink, assetType string) (tgbotapi.Message, error) {
-	if err := tg.ensureCacheUploadSizeAllowed(downloadLink, assetType); err != nil {
+func (tg *TgBot) sendCacheDocument(sourceURL, downloadLink, assetType string) (tgbotapi.Message, error) {
+	resolvedLink, err := tg.resolveCacheDownloadLink(sourceURL, downloadLink, assetType)
+	if err != nil {
 		return tgbotapi.Message{}, err
 	}
 
-	if assetType == "icon" {
-		return tg.sendCacheDocumentFromLocalFile(downloadLink, assetType)
+	if assetType == "icon" || assetType == "video" {
+		return tg.sendCacheDocumentFromLocalFile(resolvedLink, assetType)
 	}
 
-	msg := tgbotapi.NewDocument(tg.cfg.Cache.ChannelID, tgbotapi.FileURL(downloadLink))
-	msg.DisableNotification = true
-	sent, err := tg.bot.Send(msg)
+	msg := newCacheDocumentConfig(tg.cfg.Cache.ChannelID, tgbotapi.FileURL(resolvedLink), shouldDisableContentTypeDetection(assetType))
+	sent, err := tg.cacheAPI().Send(msg)
 	if err == nil {
 		return sent, nil
 	}
 
-	return tg.sendCacheDocumentFromLocalFile(downloadLink, assetType)
+	return tg.sendCacheDocumentFromLocalFile(resolvedLink, assetType)
+}
+
+func (tg *TgBot) resolveCacheDownloadLink(sourceURL, downloadLink, assetType string) (string, error) {
+	if assetType == "video" && tg.cfg.Cache.MaxUploadBytes > 0 && strings.TrimSpace(sourceURL) != "" {
+		videoLink, err := helper.GetCacheableVideoDownloadLinkFreepik(sourceURL, tg.cfg.Cache.MaxUploadBytes)
+		if err == nil && strings.TrimSpace(videoLink) != "" {
+			log.Printf("auto cache video variant selected for source=%s host=%s", summarizeURLHost(sourceURL), summarizeURLHost(videoLink))
+			return videoLink, nil
+		}
+	}
+
+	if err := tg.ensureCacheUploadSizeAllowed(downloadLink, assetType); err == nil {
+		return downloadLink, nil
+	} else if assetType != "video" {
+		return "", err
+	}
+
+	if strings.TrimSpace(sourceURL) == "" {
+		return "", fmt.Errorf("cache skipped: video exceeds upload limit and source url is missing")
+	}
+
+	videoLink, err := helper.GetCacheableVideoDownloadLinkFreepik(sourceURL, tg.cfg.Cache.MaxUploadBytes)
+	if err != nil {
+		return "", fmt.Errorf("cache skipped: no cacheable video variant found: %w", err)
+	}
+	if err := tg.ensureCacheUploadSizeAllowed(videoLink, assetType); err != nil {
+		return "", err
+	}
+	log.Printf("auto cache video fallback selected for source=%s host=%s", summarizeURLHost(sourceURL), summarizeURLHost(videoLink))
+	return videoLink, nil
 }
 
 func (tg *TgBot) sendCacheDocumentFromLocalFile(downloadLink, assetType string) (tgbotapi.Message, error) {
@@ -1180,13 +1199,28 @@ func (tg *TgBot) sendCacheDocumentFromLocalFile(downloadLink, assetType string) 
 	}
 	defer cleanup()
 
-	fallback := tgbotapi.NewDocument(tg.cfg.Cache.ChannelID, tgbotapi.FilePath(tempPath))
-	fallback.DisableNotification = true
-	sent, fallbackErr := tg.bot.Send(fallback)
+	fallback := newCacheDocumentConfig(tg.cfg.Cache.ChannelID, tgbotapi.FilePath(tempPath), shouldDisableContentTypeDetection(assetType))
+	sent, fallbackErr := tg.cacheAPI().Send(fallback)
 	if fallbackErr != nil {
 		return tgbotapi.Message{}, fmt.Errorf("local upload failed: %w", fallbackErr)
 	}
 	return sent, nil
+}
+
+func newCacheDocumentConfig(chatID int64, file tgbotapi.RequestFileData, disableContentTypeDetection bool) tgbotapi.DocumentConfig {
+	msg := tgbotapi.NewDocument(chatID, file)
+	msg.DisableNotification = true
+	msg.DisableContentTypeDetection = disableContentTypeDetection
+	return msg
+}
+
+func shouldDisableContentTypeDetection(assetType string) bool {
+	switch strings.ToLower(strings.TrimSpace(assetType)) {
+	case "video", "icon":
+		return true
+	default:
+		return false
+	}
 }
 
 func (tg *TgBot) ensureCacheUploadSizeAllowed(downloadLink, assetType string) error {

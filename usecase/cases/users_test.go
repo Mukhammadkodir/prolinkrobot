@@ -15,10 +15,10 @@ func TestIsSupportedAssetTypeVideo(t *testing.T) {
 	usecase := &UsecaseUsers{}
 
 	supported, typeName := usecase.IsSupportedAssetType("video")
-	if supported {
-		t.Fatalf("expected video to be unsupported")
+	if !supported {
+		t.Fatalf("expected video to be supported")
 	}
-	if typeName != "Videos" {
-		t.Fatalf("expected type name Videos, got %q", typeName)
+	if typeName != "video" {
+		t.Fatalf("expected type name video, got %q", typeName)
 	}
 }

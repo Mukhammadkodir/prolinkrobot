@@ -129,8 +129,6 @@ func (u *UsecaseUsers) DetectAssetType(url string) string {
 
 func (u *UsecaseUsers) IsSupportedAssetType(assetType string) (bool, string) {
 	switch assetType {
-	case "video":
-		return false, "Videos"
 	case "3d":
 		return false, "3D models"
 	case "audio":
