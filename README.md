@@ -85,33 +85,45 @@ The service will use:
 
 Use this when you want cache uploads larger than the default Telegram Bot API limit.
 
-Required env values in `/opt/prolinkrobot/shared/.env`:
+Required env values in `.env`:
 
 ```bash
 TELEGRAM_LOCAL_API_ENABLED=1
 TELEGRAM_LOCAL_API_ID=your_api_id
 TELEGRAM_LOCAL_API_HASH=your_api_hash
+TELEGRAM_LOCAL_API_BINARY=.local/bin/telegram-bot-api
 TELEGRAM_LOCAL_API_PORT=8081
 TELEGRAM_LOCAL_API_HTTP_IP=127.0.0.1
+TELEGRAM_LOCAL_API_BUILD_JOBS=1
+TELEGRAM_LOCAL_API_SWAP_SIZE_MB=2048
 ```
 
-Supported full-switch mode:
+Install local binary into the repo:
 
 ```bash
-TELEGRAM_API_ENDPOINT=http://127.0.0.1:8081/bot%s/%s
+./scripts/install_local_telegram_bot_api.sh
 ```
 
-Pragmatic cache-upload-only mode:
+Recommended local run flow:
 
 ```bash
-TELEGRAM_CACHE_API_ENDPOINT=http://127.0.0.1:8081/bot%s/%s
+./scripts/run_local_telegram_bot_api.sh
+```
+
+Open another terminal and run:
+
+```bash
+./scripts/run_local_bot.sh
 ```
 
 Notes:
 
-1. `TELEGRAM_API_ENDPOINT` is the officially supported direction because Telegram documents local Bot API usage as a full endpoint replacement.
-2. `TELEGRAM_CACHE_API_ENDPOINT` keeps user-facing traffic on the default Telegram API and sends only cache uploads through the local server.
-3. To build the local server, the deploy script uses the official [`tdlib/telegram-bot-api`](https://github.com/tdlib/telegram-bot-api) source code and requires `api_id` and `api_hash` from [my.telegram.org](https://my.telegram.org).
+1. `./scripts/run_local_bot.sh` automatically sets `TELEGRAM_CACHE_API_ENDPOINT=http://127.0.0.1:8081/bot%s/%s` when `TELEGRAM_LOCAL_API_ENABLED=1`.
+2. `./scripts/run_local_bot.sh` also defaults `CACHE_MAX_UPLOAD_BYTES` to `2147483648` when `TELEGRAM_LOCAL_API_ENABLED=1`.
+3. This keeps user-facing bot traffic on the default Telegram API and sends only cache uploads through the local server.
+4. If you prefer a full switch, you can still set `TELEGRAM_API_ENDPOINT=http://127.0.0.1:8081/bot%s/%s` manually.
+5. `api_id` and `api_hash` come from [my.telegram.org](https://my.telegram.org).
+6. On small servers, keep `TELEGRAM_LOCAL_API_BUILD_JOBS=1` and enable swap to avoid SSH lockups during the first TDLib build.
 
 ### Service commands
 

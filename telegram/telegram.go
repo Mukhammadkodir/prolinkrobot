@@ -68,6 +68,12 @@ type pendingCacheItem struct {
 	DuplicateReason string
 }
 
+type pending3DSelection struct {
+	UserID    int64
+	URL       string
+	CreatedAt time.Time
+}
+
 type autoCacheJob struct {
 	CacheKey     string
 	SourceURL    string
@@ -88,6 +94,8 @@ type TgBot struct {
 	cacheModeMu        sync.Mutex
 	cacheModeUsers     map[int64]struct{}
 	pendingCacheLinks  map[int64][]pendingCacheItem
+	threeDSelectionMu  sync.Mutex
+	threeDSelections   map[string]pending3DSelection
 	copyLinkMu         sync.Mutex
 	copyLinks          map[string]string
 	updateQueues       []chan tgbotapi.Update
@@ -114,6 +122,7 @@ func NewTgBot(cfg *config.Config, bot, cacheBot *tgbotapi.BotAPI, usecase usecas
 		setLimitStates:     make(map[int64]*setLimitState),
 		cacheModeUsers:     make(map[int64]struct{}),
 		pendingCacheLinks:  make(map[int64][]pendingCacheItem),
+		threeDSelections:   make(map[string]pending3DSelection),
 		copyLinks:          make(map[string]string),
 		cacheJobKeys:       make(map[string]struct{}),
 	}
@@ -346,6 +355,10 @@ func (tg *TgBot) handleCallback(update tgbotapi.Update) {
 
 	if strings.HasPrefix(query.Data, "copy_") {
 		tg.handleCopyCallback(query)
+		return
+	}
+	if strings.HasPrefix(query.Data, "3d_") {
+		tg.handle3DFormatCallback(query)
 		return
 	}
 
@@ -772,45 +785,14 @@ func (tg *TgBot) handleRegularMessage(update tgbotapi.Update) {
 		return
 	}
 
-	cacheKey := buildAssetCacheKey(freepikURL, assetType)
-	cached, err := tg.usecase.GetCachedAssetByKey(cacheKey)
-	if err != nil {
-		log.Printf("get cached asset failed: %v", err)
-	} else if cached != nil {
-		attempt, incrementErr := tg.usecase.TryIncrementDownload(userID)
-		if incrementErr != nil {
-			log.Printf("increment cached download failed: %v", incrementErr)
-			if editErr := tg.editMessage(message.Chat.ID, processingMsg.MessageID, messages.GetText(lang, "error"), true, nil); editErr != nil {
-				log.Printf("edit cached increment error failed: %v", editErr)
-			}
-			return
-		}
-		if !attempt.Allowed {
-			text := messages.BuildLimitMessage(lang, attempt.ErrorMessage, attempt.DownloadsToday, attempt.DailyLimit)
-			if err := tg.editMessage(message.Chat.ID, processingMsg.MessageID, text, true, nil); err != nil {
-				log.Printf("edit cached limit message failed: %v", err)
-			}
-			return
-		}
+	if assetType == "3d" {
+		tg.handle3DLinkMessage(message.Chat.ID, processingMsg.MessageID, userID, lang, freepikURL)
+		return
+	}
 
-		copyCfg := tgbotapi.NewCopyMessage(message.Chat.ID, cached.ChannelChatID, cached.ChannelMessageID)
-		limitText := messages.BuildLimitOnlyText(lang, attempt.DownloadsToday, attempt.DailyLimit)
-		copyCfg.Caption = messages.BuildCachedDeliveredMessageHTML(lang, limitText, defaultSupportURL, tg.botPublicURL())
-		copyCfg.ParseMode = tgbotapi.ModeHTML
-		if _, copyErr := tg.bot.CopyMessage(copyCfg); copyErr != nil {
-			log.Printf("cached copy failed for key=%s: %v", cacheKey, copyErr)
-			if rollbackErr := tg.usecase.DecrementDownload(userID); rollbackErr != nil {
-				log.Printf("rollback cached copy failed: %v", rollbackErr)
-			}
-			if deleteErr := tg.usecase.DeleteCachedAssetByKey(cacheKey); deleteErr != nil {
-				log.Printf("delete stale cache failed: %v", deleteErr)
-			}
-		} else {
-			if _, deleteErr := tg.bot.Request(tgbotapi.NewDeleteMessage(message.Chat.ID, processingMsg.MessageID)); deleteErr != nil {
-				log.Printf("delete cache served processing message failed: %v", deleteErr)
-			}
-			return
-		}
+	cacheKey := buildAssetCacheKey(freepikURL, assetType)
+	if tg.tryServeCachedAsset(message.Chat.ID, processingMsg.MessageID, userID, lang, cacheKey) {
+		return
 	}
 
 	downloadLink, err := tg.usecase.GetDownloadLink(freepikURL)
@@ -826,53 +808,7 @@ func (tg *TgBot) handleRegularMessage(update tgbotapi.Update) {
 		return
 	}
 
-	attempt, err := tg.usecase.TryIncrementDownload(userID)
-	if err != nil {
-		log.Printf("increment download failed: %v", err)
-		if editErr := tg.editMessage(message.Chat.ID, processingMsg.MessageID, messages.GetText(lang, "error"), true, nil); editErr != nil {
-			log.Printf("edit increment error failed: %v", editErr)
-		}
-		return
-	}
-	if !attempt.Allowed {
-		text := messages.BuildLimitMessage(lang, attempt.ErrorMessage, attempt.DownloadsToday, attempt.DailyLimit)
-		if err := tg.editMessage(message.Chat.ID, processingMsg.MessageID, text, true, nil); err != nil {
-			log.Printf("edit limit message failed: %v", err)
-		}
-		return
-	}
-
-	botURL := tg.botPublicURL()
-	limitText := messages.BuildLimitOnlyText(lang, attempt.DownloadsToday, attempt.DailyLimit)
-
-	shareText := messages.BuildSuccessMessage(
-		lang,
-		downloadLink,
-		limitText,
-		defaultSupportURL,
-		botURL,
-	)
-	visibleText := messages.BuildSuccessMessageHTML(
-		lang,
-		downloadLink,
-		limitText,
-		defaultSupportURL,
-		botURL,
-	)
-	if err := tg.editSuccessMessage(message.Chat.ID, processingMsg.MessageID, lang, visibleText, downloadLink, shareText); err != nil {
-		log.Printf("edit success message failed, trying fallback without keyboard: %v", err)
-		if fallbackErr := tg.editHTMLMessage(message.Chat.ID, processingMsg.MessageID, visibleText); fallbackErr != nil {
-			log.Printf("edit fallback success message failed, rolling back: %v", fallbackErr)
-			if rollbackErr := tg.usecase.DecrementDownload(userID); rollbackErr != nil {
-				log.Printf("rollback download failed: %v", rollbackErr)
-			}
-			_, _ = tg.sendMarkdown(message.Chat.ID, messages.GetText(lang, "error"), 0)
-			return
-		}
-	}
-
-	tg.queueAutoCacheDownloadedAsset(cacheKey, freepikURL, assetType, downloadLink)
-
+	tg.finalizeDownloadSuccess(message.Chat.ID, processingMsg.MessageID, userID, lang, freepikURL, assetType, cacheKey, downloadLink)
 }
 
 func (tg *TgBot) handleAdminCacheModeMessage(update tgbotapi.Update, lang string) bool {
@@ -896,6 +832,10 @@ func (tg *TgBot) handleAdminCacheModeMessage(update tgbotapi.Update, lang string
 	}
 
 	assetType := tg.usecase.DetectAssetType(freepikURL)
+	if assetType == "3d" {
+		tg.sendText(message.Chat.ID, lang, messages.GetText(lang, "cache_mode_3d_unsupported"), 0)
+		return true
+	}
 	if supported, typeName := tg.usecase.IsSupportedAssetType(assetType); !supported {
 		tg.sendText(message.Chat.ID, lang, fmt.Sprintf("⚠️ Unsupported type for cache import: %s", typeName), 0)
 		return true
@@ -1095,6 +1035,91 @@ func (tg *TgBot) successKeyboardJSON(lang, downloadLink, shareText string) (stri
 	return string(data), nil
 }
 
+func (tg *TgBot) handle3DLinkMessage(chatID int64, processingMessageID int, userID int64, lang, freepikURL string) {
+	options, err := tg.usecase.Get3DFormatOptions(freepikURL)
+	if err != nil {
+		log.Printf("3d format options failed: %v", err)
+		errorText := messages.GetText(lang, "error")
+		if shouldHideInternalExtractionError(err) {
+			errorText = messages.GetText(lang, "temporarily_unavailable")
+		}
+		if editErr := tg.editMessage(chatID, processingMessageID, errorText, true, nil); editErr != nil {
+			log.Printf("edit 3d format error failed: %v", editErr)
+		}
+		return
+	}
+	if len(options) == 0 {
+		if editErr := tg.editMessage(chatID, processingMessageID, messages.GetText(lang, "three_d_no_formats"), false, nil); editErr != nil {
+			log.Printf("edit 3d no formats failed: %v", editErr)
+		}
+		return
+	}
+
+	token := tg.store3DSelection(userID, freepikURL)
+	keyboard := tg.build3DFormatKeyboard(token, options)
+	if keyboard == nil {
+		if editErr := tg.editMessage(chatID, processingMessageID, messages.GetText(lang, "three_d_no_formats"), false, nil); editErr != nil {
+			log.Printf("edit 3d empty keyboard failed: %v", editErr)
+		}
+		return
+	}
+
+	if err := tg.editMessage(chatID, processingMessageID, messages.GetText(lang, "choose_3d_format"), false, keyboard); err != nil {
+		log.Printf("edit 3d selector failed: %v", err)
+	}
+}
+
+func (tg *TgBot) handle3DFormatCallback(query *tgbotapi.CallbackQuery) {
+	if query == nil || query.From == nil || query.Message == nil {
+		return
+	}
+
+	token, fileType, ok := parse3DCallbackData(query.Data)
+	if !ok {
+		_, _ = tg.bot.Request(tgbotapi.NewCallback(query.ID, "Invalid 3D format selection"))
+		return
+	}
+
+	lang := tg.currentLanguage(query.From.ID, query.From.LanguageCode)
+	selection, ok := tg.get3DSelection(token)
+	if !ok || selectionExpired(selection) {
+		tg.delete3DSelection(token)
+		_, _ = tg.bot.Request(tgbotapi.NewCallback(query.ID, messages.GetText(lang, "three_d_format_expired")))
+		return
+	}
+	if selection.UserID != query.From.ID {
+		_, _ = tg.bot.Request(tgbotapi.NewCallback(query.ID, messages.GetText(lang, "three_d_format_unauthorized")))
+		return
+	}
+
+	tg.delete3DSelection(token)
+	_, _ = tg.bot.Request(tgbotapi.NewCallback(query.ID, strings.ToUpper(fileType)))
+
+	if err := tg.editMessage(query.Message.Chat.ID, query.Message.MessageID, messages.GetText(lang, "processing"), true, nil); err != nil {
+		log.Printf("edit 3d processing failed: %v", err)
+	}
+
+	cacheKey := buildAssetCacheKeyWithVariant(selection.URL, "3d", fileType)
+	if tg.tryServeCachedAsset(query.Message.Chat.ID, query.Message.MessageID, query.From.ID, lang, cacheKey) {
+		return
+	}
+
+	downloadLink, err := tg.usecase.Get3DDownloadLink(selection.URL, fileType)
+	if err != nil {
+		log.Printf("3d download link extraction failed: %v", err)
+		errorText := messages.GetText(lang, "error")
+		if shouldHideInternalExtractionError(err) {
+			errorText = messages.GetText(lang, "temporarily_unavailable")
+		}
+		if editErr := tg.editMessage(query.Message.Chat.ID, query.Message.MessageID, errorText, true, nil); editErr != nil {
+			log.Printf("edit 3d extraction error failed: %v", editErr)
+		}
+		return
+	}
+
+	tg.finalizeDownloadSuccess(query.Message.Chat.ID, query.Message.MessageID, query.From.ID, lang, selection.URL, "3d", cacheKey, downloadLink)
+}
+
 func (tg *TgBot) handleCopyCallback(query *tgbotapi.CallbackQuery) {
 	if query == nil || query.From == nil {
 		return
@@ -1118,6 +1143,90 @@ func (tg *TgBot) handleCopyCallback(query *tgbotapi.CallbackQuery) {
 	if _, err := tg.bot.Send(msg); err != nil {
 		log.Printf("send copy link failed: %v", err)
 	}
+}
+
+func (tg *TgBot) tryServeCachedAsset(chatID int64, processingMessageID int, userID int64, lang, cacheKey string) bool {
+	cached, err := tg.usecase.GetCachedAssetByKey(cacheKey)
+	if err != nil {
+		log.Printf("get cached asset failed: %v", err)
+		return false
+	}
+	if cached == nil {
+		return false
+	}
+
+	attempt, incrementErr := tg.usecase.TryIncrementDownload(userID)
+	if incrementErr != nil {
+		log.Printf("increment cached download failed: %v", incrementErr)
+		if editErr := tg.editMessage(chatID, processingMessageID, messages.GetText(lang, "error"), true, nil); editErr != nil {
+			log.Printf("edit cached increment error failed: %v", editErr)
+		}
+		return true
+	}
+	if !attempt.Allowed {
+		text := messages.BuildLimitMessage(lang, attempt.ErrorMessage, attempt.DownloadsToday, attempt.DailyLimit)
+		if err := tg.editMessage(chatID, processingMessageID, text, true, nil); err != nil {
+			log.Printf("edit cached limit message failed: %v", err)
+		}
+		return true
+	}
+
+	copyCfg := tgbotapi.NewCopyMessage(chatID, cached.ChannelChatID, cached.ChannelMessageID)
+	limitText := messages.BuildLimitOnlyText(lang, attempt.DownloadsToday, attempt.DailyLimit)
+	copyCfg.Caption = messages.BuildCachedDeliveredMessageHTML(lang, limitText, defaultSupportURL, tg.botPublicURL())
+	copyCfg.ParseMode = tgbotapi.ModeHTML
+	if _, copyErr := tg.bot.CopyMessage(copyCfg); copyErr != nil {
+		log.Printf("cached copy failed for key=%s: %v", cacheKey, copyErr)
+		if rollbackErr := tg.usecase.DecrementDownload(userID); rollbackErr != nil {
+			log.Printf("rollback cached copy failed: %v", rollbackErr)
+		}
+		if deleteErr := tg.usecase.DeleteCachedAssetByKey(cacheKey); deleteErr != nil {
+			log.Printf("delete stale cache failed: %v", deleteErr)
+		}
+		return false
+	}
+
+	if _, deleteErr := tg.bot.Request(tgbotapi.NewDeleteMessage(chatID, processingMessageID)); deleteErr != nil {
+		log.Printf("delete cache served processing message failed: %v", deleteErr)
+	}
+	return true
+}
+
+func (tg *TgBot) finalizeDownloadSuccess(chatID int64, processingMessageID int, userID int64, lang, sourceURL, assetType, cacheKey, downloadLink string) {
+	attempt, err := tg.usecase.TryIncrementDownload(userID)
+	if err != nil {
+		log.Printf("increment download failed: %v", err)
+		if editErr := tg.editMessage(chatID, processingMessageID, messages.GetText(lang, "error"), true, nil); editErr != nil {
+			log.Printf("edit increment error failed: %v", editErr)
+		}
+		return
+	}
+	if !attempt.Allowed {
+		text := messages.BuildLimitMessage(lang, attempt.ErrorMessage, attempt.DownloadsToday, attempt.DailyLimit)
+		if err := tg.editMessage(chatID, processingMessageID, text, true, nil); err != nil {
+			log.Printf("edit limit message failed: %v", err)
+		}
+		return
+	}
+
+	botURL := tg.botPublicURL()
+	limitText := messages.BuildLimitOnlyText(lang, attempt.DownloadsToday, attempt.DailyLimit)
+	shareText := messages.BuildSuccessMessage(lang, downloadLink, limitText, defaultSupportURL, botURL)
+	visibleText := messages.BuildSuccessMessageHTML(lang, downloadLink, limitText, defaultSupportURL, botURL)
+
+	if err := tg.editSuccessMessage(chatID, processingMessageID, lang, visibleText, downloadLink, shareText); err != nil {
+		log.Printf("edit success message failed, trying fallback without keyboard: %v", err)
+		if fallbackErr := tg.editHTMLMessage(chatID, processingMessageID, visibleText); fallbackErr != nil {
+			log.Printf("edit fallback success message failed, rolling back: %v", fallbackErr)
+			if rollbackErr := tg.usecase.DecrementDownload(userID); rollbackErr != nil {
+				log.Printf("rollback download failed: %v", rollbackErr)
+			}
+			_, _ = tg.sendMarkdown(chatID, messages.GetText(lang, "error"), 0)
+			return
+		}
+	}
+
+	tg.queueAutoCacheDownloadedAsset(cacheKey, sourceURL, assetType, downloadLink)
 }
 
 func (tg *TgBot) storeCopyLink(link string) string {
@@ -1216,7 +1325,7 @@ func newCacheDocumentConfig(chatID int64, file tgbotapi.RequestFileData, disable
 
 func shouldDisableContentTypeDetection(assetType string) bool {
 	switch strings.ToLower(strings.TrimSpace(assetType)) {
-	case "video", "icon":
+	case "video", "icon", "3d":
 		return true
 	default:
 		return false
@@ -1662,11 +1771,23 @@ func (tg *TgBot) clearPendingCacheLinks(userID int64) int {
 }
 
 func buildAssetCacheKey(rawURL, assetType string) string {
+	return buildAssetCacheKeyWithVariant(rawURL, assetType, "")
+}
+
+func buildAssetCacheKeyWithVariant(rawURL, assetType, variant string) string {
 	normalized := normalizeURLForCache(rawURL)
+	normalizedVariant := strings.ToLower(strings.TrimSpace(variant))
 	if resourceID := extractResourceID(normalized); resourceID != "" {
+		if normalizedVariant != "" {
+			return assetType + ":" + resourceID + ":" + normalizedVariant
+		}
 		return assetType + ":" + resourceID
 	}
-	sum := sha256.Sum256([]byte(normalized))
+	hashInput := normalized
+	if normalizedVariant != "" {
+		hashInput += "|" + normalizedVariant
+	}
+	sum := sha256.Sum256([]byte(hashInput))
 	return "url:" + fmt.Sprintf("%x", sum[:])[:32]
 }
 
@@ -1701,4 +1822,77 @@ func summarizeURLHost(raw string) string {
 		return ""
 	}
 	return parsed.Hostname()
+}
+
+func (tg *TgBot) store3DSelection(userID int64, sourceURL string) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s:%d", userID, sourceURL, time.Now().UnixNano())))
+	token := fmt.Sprintf("%x", sum[:8])
+
+	tg.threeDSelectionMu.Lock()
+	defer tg.threeDSelectionMu.Unlock()
+	tg.threeDSelections[token] = pending3DSelection{
+		UserID:    userID,
+		URL:       sourceURL,
+		CreatedAt: time.Now(),
+	}
+	return token
+}
+
+func (tg *TgBot) get3DSelection(token string) (pending3DSelection, bool) {
+	tg.threeDSelectionMu.Lock()
+	defer tg.threeDSelectionMu.Unlock()
+	selection, ok := tg.threeDSelections[token]
+	return selection, ok
+}
+
+func (tg *TgBot) delete3DSelection(token string) {
+	tg.threeDSelectionMu.Lock()
+	defer tg.threeDSelectionMu.Unlock()
+	delete(tg.threeDSelections, token)
+}
+
+func (tg *TgBot) build3DFormatKeyboard(token string, options []models.ThreeDFormatOption) *tgbotapi.InlineKeyboardMarkup {
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 2)
+	currentRow := make([]tgbotapi.InlineKeyboardButton, 0, 2)
+
+	for _, option := range options {
+		if !option.Enabled {
+			continue
+		}
+		currentRow = append(currentRow, tgbotapi.NewInlineKeyboardButtonData(option.Name, fmt.Sprintf("3d_%s_%s", token, option.FileType)))
+		if len(currentRow) == 2 {
+			rows = append(rows, currentRow)
+			currentRow = make([]tgbotapi.InlineKeyboardButton, 0, 2)
+		}
+	}
+	if len(currentRow) > 0 {
+		rows = append(rows, currentRow)
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+
+	markup := tgbotapi.NewInlineKeyboardMarkup(rows...)
+	return &markup
+}
+
+func parse3DCallbackData(data string) (string, string, bool) {
+	payload := strings.TrimPrefix(strings.TrimSpace(data), "3d_")
+	parts := strings.SplitN(payload, "_", 2)
+	if len(parts) != 2 {
+		return "", "", false
+	}
+	token := strings.TrimSpace(parts[0])
+	fileType := strings.ToLower(strings.TrimSpace(parts[1]))
+	if token == "" || fileType == "" {
+		return "", "", false
+	}
+	return token, fileType, true
+}
+
+func selectionExpired(selection pending3DSelection) bool {
+	if selection.CreatedAt.IsZero() {
+		return true
+	}
+	return time.Since(selection.CreatedAt) > 30*time.Minute
 }

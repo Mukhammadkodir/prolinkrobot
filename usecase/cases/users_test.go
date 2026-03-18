@@ -22,3 +22,15 @@ func TestIsSupportedAssetTypeVideo(t *testing.T) {
 		t.Fatalf("expected type name video, got %q", typeName)
 	}
 }
+
+func TestIsSupportedAssetTypeThreeD(t *testing.T) {
+	usecase := &UsecaseUsers{}
+
+	supported, typeName := usecase.IsSupportedAssetType("3d")
+	if !supported {
+		t.Fatalf("expected 3d to be supported")
+	}
+	if typeName != "3d" {
+		t.Fatalf("expected type name 3d, got %q", typeName)
+	}
+}

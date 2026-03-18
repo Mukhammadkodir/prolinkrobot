@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"get-link-tg-bot/models"
 	"io"
 	"log"
 	"math"
@@ -96,6 +97,18 @@ type videoOption struct {
 	Size       int    `json:"size"`
 }
 
+type model3DMetadata struct {
+	ID               int         `json:"id"`
+	HasBlendFile     bool        `json:"hasBlendFile"`
+	HasObjFile       bool        `json:"hasObjFile"`
+	HasFbxFile       bool        `json:"hasFbxFile"`
+	WalletID         interface{} `json:"walletId"`
+	SearchExpression string      `json:"searchExpression"`
+	Specifications   struct {
+		IncludeTextures bool `json:"includeTextures"`
+	} `json:"specifications"`
+}
+
 type FreepikAuthStatus struct {
 	Source    string
 	HasToken  bool
@@ -143,26 +156,16 @@ func GetDownloadLinkFreepik(link string) (string, error) {
 		return "", errs.Wrap(&err, "extractResourceID")
 	}
 
-	cookieHeader, cookieSource, err := loadCookieHeaderWithSource()
+	cookieHeader, cookieSource, csrf, authToken, err := loadFreepikRequestAuth()
 	if err != nil {
 		return "", errs.Wrap(&err, "loadCookieHeader")
 	}
 
-	csrf := strings.TrimSpace(os.Getenv("FREEPIK_CSRF_TOKEN"))
-	if csrf == "" {
-		csrf = getCookieValue(cookieHeader, "csrf_freepik")
-	}
-	if csrf == "" {
-		csrf = getCookieValue(cookieHeader, "csrftoken")
-	}
-
-	authToken := strings.TrimSpace(os.Getenv("FREEPIK_BEARER_TOKEN"))
-	if authToken == "" {
-		authToken = getCookieValue(cookieHeader, "GR_TOKEN")
-	}
-
 	client := &http.Client{Timeout: 30 * time.Second}
 	assetType := detectAssetTypeFromPath(strings.ToLower(normalized.Path))
+	if assetType == "3d" {
+		return "", errs.New("3d format selection required")
+	}
 	var pageData *assetPageData
 	if assetType == "icon" || assetType == "video" {
 		pageData, _ = fetchAssetPageData(client, normalized, cookieHeader, cookieSource)
@@ -207,22 +210,9 @@ func GetCacheableVideoDownloadLinkFreepik(link string, maxBytes int64) (string, 
 		return "", errs.Wrap(&err, "extractResourceID")
 	}
 
-	cookieHeader, cookieSource, err := loadCookieHeaderWithSource()
+	cookieHeader, cookieSource, csrf, authToken, err := loadFreepikRequestAuth()
 	if err != nil {
 		return "", errs.Wrap(&err, "loadCookieHeader")
-	}
-
-	csrf := strings.TrimSpace(os.Getenv("FREEPIK_CSRF_TOKEN"))
-	if csrf == "" {
-		csrf = getCookieValue(cookieHeader, "csrf_freepik")
-	}
-	if csrf == "" {
-		csrf = getCookieValue(cookieHeader, "csrftoken")
-	}
-
-	authToken := strings.TrimSpace(os.Getenv("FREEPIK_BEARER_TOKEN"))
-	if authToken == "" {
-		authToken = getCookieValue(cookieHeader, "GR_TOKEN")
 	}
 
 	client := &http.Client{Timeout: 30 * time.Second}
@@ -237,6 +227,74 @@ func GetCacheableVideoDownloadLinkFreepik(link string, maxBytes int64) (string, 
 	}
 
 	return getDownloadLinkFreepikVideoWithOptionIDs(client, normalized, resourceID, pageData, optionIDs, false, cookieHeader, cookieSource, csrf, authToken)
+}
+
+func Get3DFormatOptionsFreepik(link string) ([]models.ThreeDFormatOption, error) {
+	normalized, err := normalizeFreepikURL(link)
+	if err != nil {
+		return nil, errs.Wrap(&err, "normalizeFreepikURL")
+	}
+	if !is3DPath(strings.ToLower(normalized.Path)) {
+		return nil, errs.New("not a 3d model link")
+	}
+
+	modelID, err := extractResourceID(normalized)
+	if err != nil {
+		return nil, errs.Wrap(&err, "extractResourceID")
+	}
+
+	cookieHeader, cookieSource, _, _, err := loadFreepikRequestAuth()
+	if err != nil {
+		return nil, errs.Wrap(&err, "loadCookieHeader")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	metadata, err := fetch3DModelMetadata(client, normalized, modelID, cookieHeader, cookieSource)
+	if err != nil {
+		return nil, errs.Wrap(&err, "fetch3DModelMetadata")
+	}
+
+	options := enabled3DFormatOptions(metadata)
+	if len(options) == 0 {
+		return nil, errs.New("no 3d formats available")
+	}
+	return options, nil
+}
+
+func GetDownloadLinkFreepik3D(link, fileType string) (string, error) {
+	normalized, err := normalizeFreepikURL(link)
+	if err != nil {
+		return "", errs.Wrap(&err, "normalizeFreepikURL")
+	}
+	if !is3DPath(strings.ToLower(normalized.Path)) {
+		return "", errs.New("not a 3d model link")
+	}
+
+	modelID, err := extractResourceID(normalized)
+	if err != nil {
+		return "", errs.Wrap(&err, "extractResourceID")
+	}
+
+	normalizedFileType := normalize3DFileType(fileType)
+	if normalizedFileType == "" {
+		return "", errs.New("unsupported 3d file type")
+	}
+
+	cookieHeader, cookieSource, csrf, authToken, err := loadFreepikRequestAuth()
+	if err != nil {
+		return "", errs.Wrap(&err, "loadCookieHeader")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	metadata, err := fetch3DModelMetadata(client, normalized, modelID, cookieHeader, cookieSource)
+	if err != nil {
+		return "", errs.Wrap(&err, "fetch3DModelMetadata")
+	}
+	if !is3DFileTypeAvailable(metadata, normalizedFileType) {
+		return "", errs.New("selected 3d format is not available")
+	}
+
+	return getDownloadLinkFreepik3D(client, normalized, modelID, normalizedFileType, metadata, cookieHeader, cookieSource, csrf, authToken)
 }
 
 func GetDownloadLinkFreepikFreePsd(orgLink string) (string, error) {
@@ -532,6 +590,8 @@ func detectAssetTypeFromPath(path string) string {
 		return "icon"
 	case isVideoPath(path):
 		return "video"
+	case is3DPath(path):
+		return "3d"
 	default:
 		return "regular"
 	}
@@ -561,6 +621,187 @@ func isVideoPath(path string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func is3DPath(path string) bool {
+	return strings.Contains(path, "/3d-model/") || strings.Contains(path, "3d-models")
+}
+
+func loadFreepikRequestAuth() (cookieHeader, cookieSource, csrf, authToken string, err error) {
+	cookieHeader, cookieSource, err = loadCookieHeaderWithSource()
+	if err != nil {
+		return "", "", "", "", err
+	}
+
+	csrf = strings.TrimSpace(os.Getenv("FREEPIK_CSRF_TOKEN"))
+	if csrf == "" {
+		csrf = getCookieValue(cookieHeader, "csrf_freepik")
+	}
+	if csrf == "" {
+		csrf = getCookieValue(cookieHeader, "csrftoken")
+	}
+
+	authToken = strings.TrimSpace(os.Getenv("FREEPIK_BEARER_TOKEN"))
+	if authToken == "" {
+		authToken = getCookieValue(cookieHeader, "GR_TOKEN")
+	}
+	return cookieHeader, cookieSource, csrf, authToken, nil
+}
+
+func fetch3DModelMetadata(client *http.Client, pageURL *url.URL, modelID, cookieHeader, cookieSource string) (*model3DMetadata, error) {
+	if client == nil || pageURL == nil {
+		return nil, errs.New("3d metadata request is missing client or url")
+	}
+
+	endpoint := fmt.Sprintf(
+		"%s://%s/api/model3d?id=%s&locale=%s",
+		pageURL.Scheme,
+		pageURL.Host,
+		url.QueryEscape(modelID),
+		url.QueryEscape(model3DLocale(pageURL)),
+	)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, errs.Wrap(&err, "http.NewRequest")
+	}
+
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+	req.Header.Set("Accept-Encoding", "gzip")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Cookie", cookieHeader)
+	req.Header.Set("Referer", pageURL.String())
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:148.0) Gecko/20100101 Firefox/148.0")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, errs.Wrap(&err, "client.Do")
+	}
+	defer resp.Body.Close()
+
+	if persistErr := persistAuthCookiesFromResponse(cookieSource, resp.Cookies()); persistErr != nil {
+		log.Printf("persist 3d metadata auth cookies failed: %v", persistErr)
+	}
+
+	body, err := readResponseBody(resp)
+	if err != nil {
+		return nil, errs.Wrap(&err, "readResponseBody")
+	}
+	if resp.StatusCode >= 300 {
+		return nil, errs.New(summarizeResponseError(resp.StatusCode, body, nil))
+	}
+
+	var metadata model3DMetadata
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		return nil, errs.Wrap(&err, "json.Unmarshal")
+	}
+	return &metadata, nil
+}
+
+func enabled3DFormatOptions(metadata *model3DMetadata) []models.ThreeDFormatOption {
+	all := build3DFormatOptions(metadata)
+	options := make([]models.ThreeDFormatOption, 0, len(all))
+	for _, option := range all {
+		if option.Enabled {
+			options = append(options, option)
+		}
+	}
+	return options
+}
+
+func build3DFormatOptions(metadata *model3DMetadata) []models.ThreeDFormatOption {
+	if metadata == nil {
+		return nil
+	}
+
+	return []models.ThreeDFormatOption{
+		{ID: 1, Name: "BLEND", FileType: "blend", Enabled: metadata.HasBlendFile},
+		{ID: 2, Name: "OBJ", FileType: "obj", Enabled: metadata.HasObjFile},
+		{ID: 3, Name: "FBX", FileType: "fbx", Enabled: metadata.HasFbxFile},
+		{ID: 4, Name: "TEXTURES", FileType: "textures", Enabled: metadata.Specifications.IncludeTextures},
+	}
+}
+
+func normalize3DFileType(fileType string) string {
+	switch strings.ToLower(strings.TrimSpace(fileType)) {
+	case "blend":
+		return "blend"
+	case "obj":
+		return "obj"
+	case "fbx":
+		return "fbx"
+	case "textures":
+		return "textures"
+	default:
+		return ""
+	}
+}
+
+func is3DFileTypeAvailable(metadata *model3DMetadata, fileType string) bool {
+	for _, option := range build3DFormatOptions(metadata) {
+		if option.FileType == fileType {
+			return option.Enabled
+		}
+	}
+	return false
+}
+
+func getDownloadLinkFreepik3D(client *http.Client, normalized *url.URL, modelID, fileType string, metadata *model3DMetadata, cookieHeader, cookieSource, csrf, authToken string) (string, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	if normalized == nil {
+		return "", errs.New("3d url is nil")
+	}
+
+	endpoint := build3DDownloadEndpoint(normalized, modelID, fileType, metadata)
+	downloadURL, statusCode, body, reqErr := executeDownloadRequest(client, "3d-"+fileType, endpoint, normalized.String(), cookieHeader, cookieSource, csrf, authToken)
+	if reqErr == nil && downloadURL != "" {
+		return downloadURL, nil
+	}
+	return "", errs.New(fmt.Sprintf("3d-download[%s] -> %s", fileType, summarizeResponseError(statusCode, body, reqErr)))
+}
+
+func build3DDownloadEndpoint(normalized *url.URL, modelID, fileType string, metadata *model3DMetadata) string {
+	query := url.Values{}
+	query.Set("fileType", fileType)
+
+	if walletID := normalizeScalarString(metadata.WalletID); walletID != "" {
+		query.Set("walletId", walletID)
+	}
+	if searchExpression := strings.TrimSpace(metadata.SearchExpression); searchExpression != "" {
+		query.Set("searchExpression", searchExpression)
+	}
+
+	return fmt.Sprintf("%s://%s/api/model3d/%s/download?%s", normalized.Scheme, normalized.Host, modelID, query.Encode())
+}
+
+func normalizeScalarString(value interface{}) string {
+	switch current := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(current)
+	case float64:
+		return strconv.FormatInt(int64(current), 10)
+	case int:
+		return strconv.Itoa(current)
+	case int64:
+		return strconv.FormatInt(current, 10)
+	case json.Number:
+		return current.String()
+	default:
+		return strings.TrimSpace(fmt.Sprint(current))
+	}
+}
+
+func model3DLocale(u *url.URL) string {
+	switch locale := strings.ToLower(strings.TrimSpace(GetLanguageFreepik(u.String()))); locale {
+	case "", "www":
+		return "en"
+	default:
+		return locale
 	}
 }
 
@@ -1589,6 +1830,15 @@ func scoreCandidateURL(raw, context string) int {
 		if strings.Contains(host, "cdn-icons.flaticon.com") || strings.Contains(host, "flaticon.com") {
 			score += 5000
 		}
+	case "3d":
+		switch ext {
+		case ".blend":
+			score += 9000
+		case ".fbx", ".obj", ".zip", ".mtl":
+			score += 7000
+		case ".png", ".jpg", ".jpeg", ".svg", ".mp4", ".mov", ".webm":
+			score -= 12000
+		}
 	case "regular":
 		switch ext {
 		case ".zip", ".psd", ".eps", ".ai":
@@ -1616,6 +1866,8 @@ func responseContextKind(context string) string {
 		return "video"
 	case strings.HasPrefix(value, "icon"):
 		return "icon"
+	case strings.HasPrefix(value, "3d"):
+		return "3d"
 	default:
 		return "regular"
 	}
@@ -1846,7 +2098,7 @@ func isActualVideoDownloadPath(urlPath string) bool {
 
 func hasDownloadableExtension(urlPath string) bool {
 	switch pathpkg.Ext(strings.ToLower(urlPath)) {
-	case ".svg", ".png", ".zip", ".eps", ".ai", ".jpg", ".jpeg", ".mp4", ".mov", ".webm", ".avi", ".wav", ".mp3":
+	case ".svg", ".png", ".zip", ".eps", ".ai", ".jpg", ".jpeg", ".mp4", ".mov", ".webm", ".avi", ".wav", ".mp3", ".blend", ".obj", ".fbx", ".mtl":
 		return true
 	default:
 		return false

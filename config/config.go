@@ -113,7 +113,7 @@ func NewConfig() (cfg *Config, err error) {
 	cfg.Cache = Cache{
 		ChannelID:       envInt64("CACHE_CHANNEL_ID", 0),
 		AssetCollection: envString("MONGODB_ASSET_CACHE_COLLECTION", "asset_cache"),
-		MaxUploadBytes:  envInt64("CACHE_MAX_UPLOAD_BYTES", 50*1024*1024),
+		MaxUploadBytes:  cacheMaxUploadBytes(),
 	}
 	cfg.Freepik = Freepik{
 		AuthCheckIntervalMinutes: envInt("FREEPIK_AUTH_CHECK_INTERVAL_MINUTES", 5),
@@ -177,6 +177,21 @@ func envInt64(key string, fallback int64) int64 {
 		return fallback
 	}
 	return n
+}
+
+func cacheMaxUploadBytes() int64 {
+	if value := strings.TrimSpace(os.Getenv("CACHE_MAX_UPLOAD_BYTES")); value != "" {
+		n, err := strconv.ParseInt(value, 10, 64)
+		if err == nil {
+			return n
+		}
+	}
+
+	if strings.TrimSpace(os.Getenv("TELEGRAM_LOCAL_API_ENABLED")) == "1" {
+		return 2 * 1024 * 1024 * 1024
+	}
+
+	return 50 * 1024 * 1024
 }
 
 func loadDotEnv(path string) {

@@ -51,3 +51,10 @@ type AssetCacheEntry struct {
 	AssetType        string    `bson:"asset_type,omitempty"`
 	CreatedAt        time.Time `bson:"created_at"`
 }
+
+type ThreeDFormatOption struct {
+	ID       int
+	Name     string
+	FileType string
+	Enabled  bool
+}

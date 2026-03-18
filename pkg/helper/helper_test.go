@@ -98,6 +98,63 @@ func TestBuildIconDownloadEndpointsReturnsOnlySVG(t *testing.T) {
 	}
 }
 
+func TestBuild3DFormatOptions(t *testing.T) {
+	metadata := &model3DMetadata{
+		HasBlendFile: true,
+		HasObjFile:   false,
+		HasFbxFile:   true,
+	}
+	metadata.Specifications.IncludeTextures = true
+
+	got := build3DFormatOptions(metadata)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 format options, got %d", len(got))
+	}
+	if got[0].Name != "BLEND" || !got[0].Enabled {
+		t.Fatalf("expected BLEND to be enabled, got %+v", got[0])
+	}
+	if got[1].Name != "OBJ" || got[1].Enabled {
+		t.Fatalf("expected OBJ to be disabled, got %+v", got[1])
+	}
+	if got[3].Name != "TEXTURES" || !got[3].Enabled {
+		t.Fatalf("expected TEXTURES to be enabled, got %+v", got[3])
+	}
+}
+
+func TestGetDownloadLinkFreepik3DUsesModel3DEndpoint(t *testing.T) {
+	client := &http.Client{
+		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path != "/api/model3d/23192/download" {
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+			}
+			if got := req.URL.Query().Get("fileType"); got != "blend" {
+				t.Fatalf("expected fileType=blend, got %q", got)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body: io.NopCloser(strings.NewReader(`{
+					"url":"https://3d.cdnpk.net/models/23192/downloads/tube-box.blend?token=1"
+				}`)),
+				Request: req,
+			}, nil
+		}),
+	}
+
+	normalized, err := url.Parse("https://www.freepik.com/3d-model/tube-box-with-label_23192.htm")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	got, err := getDownloadLinkFreepik3D(client, normalized, "23192", "blend", &model3DMetadata{}, "GR_TOKEN=test", "", "", "token")
+	if err != nil {
+		t.Fatalf("getDownloadLinkFreepik3D returned error: %v", err)
+	}
+	want := "https://3d.cdnpk.net/models/23192/downloads/tube-box.blend?token=1"
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
+	}
+}
+
 func TestBuildDownloadEndpointsPrioritizesLocaleForRegularAssets(t *testing.T) {
 	u, err := url.Parse("https://www.freepik.com/premium-psd/book-cover-mockup-orange-office-chair_423135438.htm")
 	if err != nil {

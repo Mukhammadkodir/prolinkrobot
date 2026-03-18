@@ -7,6 +7,7 @@ import (
 	"get-link-tg-bot/telegram"
 	"get-link-tg-bot/usecase"
 	"get-link-tg-bot/usecase/cases"
+	"log"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -60,7 +61,8 @@ func (a *app) TelegramBot() error {
 	if cacheEndpoint := strings.TrimSpace(a.cfg.Telegram.CacheAPIEndpoint); cacheEndpoint != "" && cacheEndpoint != strings.TrimSpace(a.cfg.Telegram.APIEndpoint) {
 		cacheBot, err = newBotAPI(a.cfg.Telegram.BotToken, cacheEndpoint)
 		if err != nil {
-			return errs.Wrap(&err, "tgbotapi.NewBotAPIWithAPIEndpoint(cache)")
+			log.Printf("cache telegram api unavailable, falling back to primary bot api: %v", err)
+			cacheBot = bot
 		}
 	}
 

@@ -18,6 +18,8 @@ type UsecaseUsersI interface {
 	DetectAssetType(url string) string
 	IsSupportedAssetType(assetType string) (bool, string)
 	GetDownloadLink(url string) (string, error)
+	Get3DFormatOptions(url string) ([]models.ThreeDFormatOption, error)
+	Get3DDownloadLink(url, fileType string) (string, error)
 	TryIncrementDownload(tgID int64) (*models.DownloadAttempt, error)
 	DecrementDownload(tgID int64) error
 	GetUserStats(tgID int64) (*models.UserStats, error)

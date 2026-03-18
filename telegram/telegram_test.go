@@ -37,6 +37,22 @@ func TestBuildAssetCacheKeyNormalizesIconURLs(t *testing.T) {
 	}
 }
 
+func TestBuildAssetCacheKeyWithVariantSeparates3DFormats(t *testing.T) {
+	raw := "https://www.freepik.com/3d-model/tube-box-with-label_23192.htm#fromView=keyword"
+	blend := buildAssetCacheKeyWithVariant(raw, "3d", "blend")
+	fbx := buildAssetCacheKeyWithVariant(raw, "3d", "fbx")
+
+	if blend != "3d:23192:blend" {
+		t.Fatalf("expected blend key, got %q", blend)
+	}
+	if fbx != "3d:23192:fbx" {
+		t.Fatalf("expected fbx key, got %q", fbx)
+	}
+	if blend == fbx {
+		t.Fatal("expected different cache keys for different 3d formats")
+	}
+}
+
 func TestAssetDownloadAcceptHeaderForIcons(t *testing.T) {
 	got := assetDownloadAcceptHeader("icon", "https://cdn-icons.flaticon.com/svg/785/785116.svg")
 	if got == "*/*" {

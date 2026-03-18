@@ -129,8 +129,6 @@ func (u *UsecaseUsers) DetectAssetType(url string) string {
 
 func (u *UsecaseUsers) IsSupportedAssetType(assetType string) (bool, string) {
 	switch assetType {
-	case "3d":
-		return false, "3D models"
 	case "audio":
 		return false, "Music and Sound Effects"
 	case "font":
@@ -143,6 +141,16 @@ func (u *UsecaseUsers) IsSupportedAssetType(assetType string) (bool, string) {
 func (u *UsecaseUsers) GetDownloadLink(url string) (downloadLink string, err error) {
 	defer errs.WrapLog(&err, "UsecaseUsers", "GetDownloadLink")
 	return helper.GetDownloadLinkFreepik(url)
+}
+
+func (u *UsecaseUsers) Get3DFormatOptions(url string) (options []models.ThreeDFormatOption, err error) {
+	defer errs.WrapLog(&err, "UsecaseUsers", "Get3DFormatOptions")
+	return helper.Get3DFormatOptionsFreepik(url)
+}
+
+func (u *UsecaseUsers) Get3DDownloadLink(url, fileType string) (downloadLink string, err error) {
+	defer errs.WrapLog(&err, "UsecaseUsers", "Get3DDownloadLink")
+	return helper.GetDownloadLinkFreepik3D(url, fileType)
 }
 
 func (u *UsecaseUsers) TryIncrementDownload(tgID int64) (resp *models.DownloadAttempt, err error) {
