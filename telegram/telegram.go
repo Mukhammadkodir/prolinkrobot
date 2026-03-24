@@ -81,6 +81,15 @@ type autoCacheJob struct {
 	DownloadLink string
 }
 
+type adminCacheImportJob struct {
+	AdminChatID     int64
+	Lang            string
+	Item            pendingCacheItem
+	SourceChatID    int64
+	SourceMessageID int
+	StatusMessageID int
+}
+
 type TgBot struct {
 	cfg                *config.Config
 	bot                *tgbotapi.BotAPI
@@ -100,6 +109,7 @@ type TgBot struct {
 	copyLinks          map[string]string
 	updateQueues       []chan tgbotapi.Update
 	cacheJobs          chan autoCacheJob
+	adminCacheJobs     chan adminCacheImportJob
 	cacheJobMu         sync.Mutex
 	cacheJobKeys       map[string]struct{}
 }
@@ -128,6 +138,7 @@ func NewTgBot(cfg *config.Config, bot, cacheBot *tgbotapi.BotAPI, usecase usecas
 	}
 	tg.startUpdateWorkers()
 	tg.startCacheWorkers()
+	tg.startAdminCacheWorkers()
 	return tg
 }
 
@@ -231,6 +242,38 @@ func (tg *TgBot) startCacheWorkers() {
 	}
 }
 
+func (tg *TgBot) startAdminCacheWorkers() {
+	workers := tg.cfg.App.AdminCacheWorkers
+	if workers <= 0 {
+		workers = 1
+	}
+	queueSize := tg.cfg.App.AdminCacheQueueSize
+	if queueSize <= 0 {
+		queueSize = 256
+	}
+
+	tg.adminCacheJobs = make(chan adminCacheImportJob, queueSize)
+	for i := 0; i < workers; i++ {
+		go func(queue <-chan adminCacheImportJob) {
+			for job := range queue {
+				tg.processAdminCacheImportJob(job)
+			}
+		}(tg.adminCacheJobs)
+	}
+}
+
+func (tg *TgBot) queueAdminCacheImportJob(job adminCacheImportJob) bool {
+	if tg.adminCacheJobs == nil {
+		return false
+	}
+	select {
+	case tg.adminCacheJobs <- job:
+		return true
+	default:
+		return false
+	}
+}
+
 func (tg *TgBot) queueAutoCacheDownloadedAsset(cacheKey, sourceURL, assetType, downloadLink string) {
 	if tg.cfg.Cache.ChannelID == 0 || strings.TrimSpace(downloadLink) == "" || tg.cacheJobs == nil {
 		return
@@ -295,6 +338,39 @@ func (tg *TgBot) processAutoCacheDownloadedAsset(job autoCacheJob) {
 		log.Printf("auto cache save failed for key=%s: %v", job.CacheKey, err)
 		if _, deleteErr := tg.cacheAPI().Request(tgbotapi.NewDeleteMessage(tg.cfg.Cache.ChannelID, sent.MessageID)); deleteErr != nil {
 			log.Printf("auto cache cleanup failed for key=%s message_id=%d: %v", job.CacheKey, sent.MessageID, deleteErr)
+		}
+	}
+}
+
+func (tg *TgBot) processAdminCacheImportJob(job adminCacheImportJob) {
+	copied, err := tg.copyMessageToCacheChannel(job.SourceChatID, job.SourceMessageID)
+	if err != nil {
+		log.Printf("admin cache import copy failed for key=%s: %v", job.Item.CacheKey, err)
+		if job.StatusMessageID > 0 {
+			if editErr := tg.editAdminCacheProgress(job.AdminChatID, job.StatusMessageID, fmt.Sprintf("❌ Cache import failed.\n🔑 Key: %s\nReason: %s", job.Item.CacheKey, err.Error())); editErr != nil {
+				log.Printf("edit admin cache failure progress failed for key=%s: %v", job.Item.CacheKey, editErr)
+			}
+		}
+		return
+	}
+
+	if err := tg.usecase.SaveCachedAsset(job.Item.CacheKey, normalizeURLForCache(job.Item.URL), tg.cfg.Cache.ChannelID, copied.MessageID, job.Item.AssetType); err != nil {
+		log.Printf("admin cache import save failed for key=%s: %v", job.Item.CacheKey, err)
+		if _, deleteErr := tg.cacheAPI().Request(tgbotapi.NewDeleteMessage(tg.cfg.Cache.ChannelID, copied.MessageID)); deleteErr != nil {
+			log.Printf("admin cache import cleanup failed for key=%s message_id=%d: %v", job.Item.CacheKey, copied.MessageID, deleteErr)
+		}
+		if job.StatusMessageID > 0 {
+			if editErr := tg.editAdminCacheProgress(job.AdminChatID, job.StatusMessageID, fmt.Sprintf("❌ Failed to save cache mapping.\n🔑 Key: %s", job.Item.CacheKey)); editErr != nil {
+				log.Printf("edit admin cache save failure progress failed for key=%s: %v", job.Item.CacheKey, editErr)
+			}
+		}
+		return
+	}
+
+	log.Printf("admin cache import completed for key=%s message_id=%d", job.Item.CacheKey, copied.MessageID)
+	if job.StatusMessageID > 0 {
+		if editErr := tg.editAdminCacheProgress(job.AdminChatID, job.StatusMessageID, fmt.Sprintf("✅ Cached successfully.\n🔑 Key: %s\n🧾 Channel message_id: %d", job.Item.CacheKey, copied.MessageID)); editErr != nil {
+			log.Printf("edit admin cache success progress failed for key=%s: %v", job.Item.CacheKey, editErr)
 		}
 	}
 }
@@ -857,7 +933,7 @@ func (tg *TgBot) handleAdminCacheModeMessage(update tgbotapi.Update, lang string
 		duplicateReason = "already pending in current import queue"
 	}
 
-	pending := tg.queuePendingCacheLink(userID, pendingCacheItem{
+	tg.queuePendingCacheLink(userID, pendingCacheItem{
 		URL:             freepikURL,
 		CacheKey:        cacheKey,
 		AssetType:       assetType,
@@ -866,21 +942,9 @@ func (tg *TgBot) handleAdminCacheModeMessage(update tgbotapi.Update, lang string
 	})
 
 	if duplicate {
-		tg.sendText(
-			message.Chat.ID,
-			lang,
-			fmt.Sprintf("⚠️ Duplicate link queued in skip mode.\nNext file will be consumed but NOT uploaded.\n🔑 Key: %s\n📝 Reason: %s\n⏳ Pending links: %d", cacheKey, duplicateReason, pending),
-			0,
-		)
 		return true
 	}
 
-	tg.sendText(
-		message.Chat.ID,
-		lang,
-		fmt.Sprintf("✅ Link queued for next file.\n🔑 Key: %s\n⏳ Pending links: %d", cacheKey, pending),
-		0,
-	)
 	return true
 }
 
@@ -889,13 +953,13 @@ func (tg *TgBot) handleAdminCacheFileMessage(update tgbotapi.Update, lang string
 	userID := message.From.ID
 
 	if tg.cfg.Cache.ChannelID == 0 {
-		tg.sendText(message.Chat.ID, lang, "❌ CACHE_CHANNEL_ID is not configured.", 0)
+		tg.sendText(message.Chat.ID, lang, "❌ CACHE_CHANNEL_ID is not configured.", message.MessageID)
 		return
 	}
 
 	item, ok := tg.popPendingCacheLink(userID)
 	if !ok {
-		tg.sendText(message.Chat.ID, lang, "⚠️ No pending link for this file.\nPlease send a Freepik link first.", 0)
+		tg.sendText(message.Chat.ID, lang, "⚠️ No pending link for this file.\nPlease send a Freepik link first.", message.MessageID)
 		return
 	}
 
@@ -903,33 +967,37 @@ func (tg *TgBot) handleAdminCacheFileMessage(update tgbotapi.Update, lang string
 		tg.sendText(
 			message.Chat.ID,
 			lang,
-			fmt.Sprintf("♻️ Duplicate link detected. File skipped (not uploaded to cache channel).\n📝 Reason: %s\n⏳ Pending links left: %d", item.DuplicateReason, tg.pendingCacheCount(userID)),
-			0,
+			fmt.Sprintf("♻️ Duplicate link detected. File skipped.\n🔑 Key: %s\n📝 Reason: %s", item.CacheKey, item.DuplicateReason),
+			message.MessageID,
 		)
 		return
 	}
 
-	copyCfg := tgbotapi.NewCopyMessage(tg.cfg.Cache.ChannelID, message.Chat.ID, message.MessageID)
-	copyCfg.DisableNotification = true
-	copied, err := tg.cacheAPI().CopyMessage(copyCfg)
+	progressText := fmt.Sprintf("📥 Cache import queued.\n🔑 Key: %s", item.CacheKey)
+	progressMsg, err := tg.sendAdminCacheProgress(message.Chat.ID, message.MessageID, progressText)
 	if err != nil {
+		log.Printf("send admin cache progress failed for key=%s: %v", item.CacheKey, err)
 		tg.prependPendingCacheLink(userID, item)
-		tg.sendText(message.Chat.ID, lang, "❌ Failed to copy file to cache channel: "+err.Error(), 0)
+		tg.sendText(message.Chat.ID, lang, "❌ Failed to create cache progress message. Please resend the file.", message.MessageID)
 		return
 	}
 
-	if err := tg.usecase.SaveCachedAsset(item.CacheKey, normalizeURLForCache(item.URL), tg.cfg.Cache.ChannelID, copied.MessageID, item.AssetType); err != nil {
-		tg.prependPendingCacheLink(userID, item)
-		tg.sendText(message.Chat.ID, lang, "❌ Failed to save cache mapping to database.", 0)
-		return
+	job := adminCacheImportJob{
+		AdminChatID:     message.Chat.ID,
+		Lang:            lang,
+		Item:            item,
+		SourceChatID:    message.Chat.ID,
+		SourceMessageID: message.MessageID,
+		StatusMessageID: progressMsg.MessageID,
 	}
 
-	tg.sendText(
-		message.Chat.ID,
-		lang,
-		fmt.Sprintf("✅ Cached successfully.\n🔑 Key: %s\n🧾 Channel message_id: %d\n⏳ Pending links left: %d", item.CacheKey, copied.MessageID, tg.pendingCacheCount(userID)),
-		0,
-	)
+	if !tg.queueAdminCacheImportJob(job) {
+		tg.prependPendingCacheLink(userID, item)
+		if editErr := tg.editAdminCacheProgress(message.Chat.ID, progressMsg.MessageID, "❌ Cache import queue is full.\nPlease wait a little and resend the file."); editErr != nil {
+			log.Printf("edit admin cache queue full progress failed for key=%s: %v", item.CacheKey, editErr)
+		}
+		return
+	}
 }
 
 func (tg *TgBot) sendText(chatID int64, lang, text string, replyTo int) {
@@ -940,6 +1008,20 @@ func (tg *TgBot) sendText(chatID int64, lang, text string, replyTo int) {
 	if _, err := tg.bot.Send(msg); err != nil {
 		log.Printf("send text failed: %v", err)
 	}
+}
+
+func (tg *TgBot) sendAdminCacheProgress(chatID int64, replyTo int, text string) (tgbotapi.Message, error) {
+	msg := tgbotapi.NewMessage(chatID, text)
+	if replyTo > 0 {
+		msg.ReplyToMessageID = replyTo
+	}
+	return tg.bot.Send(msg)
+}
+
+func (tg *TgBot) editAdminCacheProgress(chatID int64, messageID int, text string) error {
+	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
+	_, err := tg.bot.Send(edit)
+	return err
 }
 
 func (tg *TgBot) NotifyAdmins(text string) {
@@ -1142,6 +1224,78 @@ func (tg *TgBot) handleCopyCallback(query *tgbotapi.CallbackQuery) {
 	msg.DisableWebPagePreview = true
 	if _, err := tg.bot.Send(msg); err != nil {
 		log.Printf("send copy link failed: %v", err)
+	}
+}
+
+func (tg *TgBot) copyMessageToCacheChannel(sourceChatID int64, sourceMessageID int) (tgbotapi.MessageID, error) {
+	const maxAttempts = 5
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		copyCfg := tgbotapi.NewCopyMessage(tg.cfg.Cache.ChannelID, sourceChatID, sourceMessageID)
+		copyCfg.DisableNotification = true
+
+		copied, err := tg.cacheAPI().CopyMessage(copyCfg)
+		if err == nil {
+			return copied, nil
+		}
+
+		lastErr = err
+		if !shouldRetryCacheCopy(err) || attempt == maxAttempts {
+			break
+		}
+
+		delay := cacheCopyRetryDelay(err, attempt)
+		log.Printf("admin cache import retry attempt=%d delay=%s err=%v", attempt, delay, err)
+		time.Sleep(delay)
+	}
+
+	return tgbotapi.MessageID{}, lastErr
+}
+
+func shouldRetryCacheCopy(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if tgErr, ok := err.(*tgbotapi.Error); ok {
+		if tgErr.RetryAfter > 0 {
+			return true
+		}
+		return tgErr.Code == http.StatusTooManyRequests || tgErr.Code >= http.StatusInternalServerError
+	}
+
+	value := strings.ToLower(err.Error())
+	retryableMarkers := []string{
+		"timeout",
+		"tempor",
+		"connection reset",
+		"connection refused",
+		"eof",
+		"context deadline exceeded",
+	}
+	for _, marker := range retryableMarkers {
+		if strings.Contains(value, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheCopyRetryDelay(err error, attempt int) time.Duration {
+	if tgErr, ok := err.(*tgbotapi.Error); ok && tgErr.RetryAfter > 0 {
+		return time.Duration(tgErr.RetryAfter) * time.Second
+	}
+
+	switch attempt {
+	case 1:
+		return 2 * time.Second
+	case 2:
+		return 5 * time.Second
+	case 3:
+		return 10 * time.Second
+	default:
+		return 15 * time.Second
 	}
 }
 

@@ -63,9 +63,15 @@ else
   git -C "$SRC_REPO_DIR" submodule update --init --recursive --depth 1
 fi
 
-if [[ "$FORCE_REBUILD" == "1" || ! -x "$BIN_PATH" ]]; then
+if [[ "$FORCE_REBUILD" == "1" ]]; then
   rm -rf "$SRC_REPO_DIR/build"
+fi
+
+if [[ "$FORCE_REBUILD" == "1" || ! -f "$SRC_REPO_DIR/build/CMakeCache.txt" ]]; then
   cmake -S "$SRC_REPO_DIR" -B "$SRC_REPO_DIR/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+fi
+
+if [[ "$FORCE_REBUILD" == "1" || ! -x "$BIN_PATH" ]]; then
   cmake --build "$SRC_REPO_DIR/build" --target install --parallel "$BUILD_JOBS"
 fi
 

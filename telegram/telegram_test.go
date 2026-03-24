@@ -3,6 +3,7 @@ package telegram
 import (
 	"net/http"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
@@ -91,5 +92,27 @@ func TestShouldDisableContentTypeDetection(t *testing.T) {
 	}
 	if shouldDisableContentTypeDetection("regular") {
 		t.Fatal("expected regular uploads to keep default content type detection")
+	}
+}
+
+func TestShouldRetryCacheCopy(t *testing.T) {
+	if !shouldRetryCacheCopy(&tgbotapi.Error{Code: http.StatusTooManyRequests, ResponseParameters: tgbotapi.ResponseParameters{RetryAfter: 3}}) {
+		t.Fatal("expected retry_after telegram errors to be retried")
+	}
+	if !shouldRetryCacheCopy(&tgbotapi.Error{Code: http.StatusBadGateway}) {
+		t.Fatal("expected 5xx telegram errors to be retried")
+	}
+	if shouldRetryCacheCopy(&tgbotapi.Error{Code: http.StatusBadRequest}) {
+		t.Fatal("expected 4xx telegram errors without retry_after to fail fast")
+	}
+	if !shouldRetryCacheCopy(http.ErrHandlerTimeout) {
+		t.Fatal("expected timeout-like errors to be retried")
+	}
+}
+
+func TestCacheCopyRetryDelayPrefersRetryAfter(t *testing.T) {
+	delay := cacheCopyRetryDelay(&tgbotapi.Error{Code: http.StatusTooManyRequests, ResponseParameters: tgbotapi.ResponseParameters{RetryAfter: 7}}, 1)
+	if delay != 7*time.Second {
+		t.Fatalf("expected retry_after delay, got %s", delay)
 	}
 }

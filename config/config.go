@@ -20,12 +20,14 @@ type Config struct {
 }
 
 type App struct {
-	Name            string `yaml:"name" env:"APP_NAME"`
-	Version         string `yaml:"version" env:"APP_VERSION"`
-	UpdateWorkers   int    `env:"UPDATE_WORKERS"`
-	UpdateQueueSize int    `env:"UPDATE_QUEUE_SIZE"`
-	CacheWorkers    int    `env:"CACHE_WORKERS"`
-	CacheQueueSize  int    `env:"CACHE_QUEUE_SIZE"`
+	Name                string `yaml:"name" env:"APP_NAME"`
+	Version             string `yaml:"version" env:"APP_VERSION"`
+	UpdateWorkers       int    `env:"UPDATE_WORKERS"`
+	UpdateQueueSize     int    `env:"UPDATE_QUEUE_SIZE"`
+	CacheWorkers        int    `env:"CACHE_WORKERS"`
+	CacheQueueSize      int    `env:"CACHE_QUEUE_SIZE"`
+	AdminCacheWorkers   int    `env:"ADMIN_CACHE_WORKERS"`
+	AdminCacheQueueSize int    `env:"ADMIN_CACHE_QUEUE_SIZE"`
 }
 
 type Telegram struct {
@@ -71,12 +73,14 @@ func NewConfig() (cfg *Config, err error) {
 
 	cfg = &Config{}
 	cfg.App = App{
-		Name:            envString("APP_NAME", "get-link-tg-bot"),
-		Version:         envString("APP_VERSION", "0.0.1"),
-		UpdateWorkers:   envInt("UPDATE_WORKERS", 8),
-		UpdateQueueSize: envInt("UPDATE_QUEUE_SIZE", 128),
-		CacheWorkers:    envInt("CACHE_WORKERS", 2),
-		CacheQueueSize:  envInt("CACHE_QUEUE_SIZE", 128),
+		Name:                envString("APP_NAME", "get-link-tg-bot"),
+		Version:             envString("APP_VERSION", "0.0.1"),
+		UpdateWorkers:       envInt("UPDATE_WORKERS", 8),
+		UpdateQueueSize:     envInt("UPDATE_QUEUE_SIZE", 128),
+		CacheWorkers:        envInt("CACHE_WORKERS", 2),
+		CacheQueueSize:      envInt("CACHE_QUEUE_SIZE", 128),
+		AdminCacheWorkers:   envInt("ADMIN_CACHE_WORKERS", 1),
+		AdminCacheQueueSize: envInt("ADMIN_CACHE_QUEUE_SIZE", 256),
 	}
 
 	botToken := strings.TrimSpace(os.Getenv("BOT_TOKEN"))
@@ -94,7 +98,7 @@ func NewConfig() (cfg *Config, err error) {
 		Offset:           envInt("OFFSET", 0),
 		Timeout:          envInt("TIMEOUT", 60),
 		APIEndpoint:      envString("TELEGRAM_API_ENDPOINT", ""),
-		CacheAPIEndpoint: envString("TELEGRAM_CACHE_API_ENDPOINT", ""),
+		CacheAPIEndpoint: cacheAPIEndpoint(),
 	}
 
 	cfg.Mongo = Mongo{
@@ -192,6 +196,20 @@ func cacheMaxUploadBytes() int64 {
 	}
 
 	return 50 * 1024 * 1024
+}
+
+func cacheAPIEndpoint() string {
+	if value := strings.TrimSpace(os.Getenv("TELEGRAM_CACHE_API_ENDPOINT")); value != "" {
+		return value
+	}
+
+	if strings.TrimSpace(os.Getenv("TELEGRAM_LOCAL_API_ENABLED")) == "1" {
+		host := envString("TELEGRAM_LOCAL_API_HTTP_IP", "127.0.0.1")
+		port := envString("TELEGRAM_LOCAL_API_PORT", "8081")
+		return "http://" + host + ":" + port + "/bot%s/%s"
+	}
+
+	return ""
 }
 
 func loadDotEnv(path string) {
