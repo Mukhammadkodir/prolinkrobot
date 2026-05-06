@@ -114,26 +114,7 @@ func (u *Users) SaveTelegramUser(req *models.SaveTelegramUserRequest) error {
 	ctx, cancel := u.operationContext()
 	defer cancel()
 
-	update := bson.M{
-		"$setOnInsert": bson.M{
-			"tg_id":                req.TelegramID,
-			"name":                 req.Name,
-			"username":             req.Username,
-			"lang":                 req.Language,
-			"daily_limit":          defaultIfZero(req.DailyLimit, u.cfg.Limits.DefaultDailyLimit),
-			"limit_date":           req.LimitDate,
-			"downloads_today":      0,
-			"downloads_reset_date": u.todayString(now),
-			"total_downloads":      0,
-			"create_date":          now,
-			"update_date":          now,
-		},
-		"$set": bson.M{
-			"name":        req.Name,
-			"username":    req.Username,
-			"update_date": now,
-		},
-	}
+	update := buildSaveTelegramUserUpdate(req, now, u.cfg.Limits.DefaultDailyLimit, u.todayString(now))
 
 	_, err := u.collection.UpdateOne(ctx, bson.M{"tg_id": req.TelegramID}, update, options.Update().SetUpsert(true))
 	if err != nil {
@@ -417,6 +398,26 @@ func (u *Users) normalizeUserDefaults(user *models.TelegramUser) {
 
 func (u *Users) todayString(now time.Time) string {
 	return now.In(u.location).Format("2006-01-02")
+}
+
+func buildSaveTelegramUserUpdate(req *models.SaveTelegramUserRequest, now time.Time, defaultDailyLimit int, today string) bson.M {
+	return bson.M{
+		"$setOnInsert": bson.M{
+			"tg_id":                req.TelegramID,
+			"lang":                 req.Language,
+			"daily_limit":          defaultIfZero(req.DailyLimit, defaultDailyLimit),
+			"limit_date":           req.LimitDate,
+			"downloads_today":      0,
+			"downloads_reset_date": today,
+			"total_downloads":      0,
+			"create_date":          now,
+		},
+		"$set": bson.M{
+			"name":        req.Name,
+			"username":    req.Username,
+			"update_date": now,
+		},
+	}
 }
 
 func (u *Users) operationContext() (context.Context, context.CancelFunc) {

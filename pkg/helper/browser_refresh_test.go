@@ -23,7 +23,7 @@ func TestBrowserCookieParamsSeedsAllNonEmptyCookies(t *testing.T) {
 			t.Fatal("expected non-nil cookie param")
 		}
 		names[param.Name] = true
-		if param.URL != "https://www.freepik.com/" {
+		if param.URL != primaryAssetBaseURL() {
 			t.Fatalf("expected cookie URL to be set, got %q", param.URL)
 		}
 	}

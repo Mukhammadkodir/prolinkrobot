@@ -1575,6 +1575,8 @@ func fetchAssetForCache(client *http.Client, downloadLink, assetType string) (*h
 	referers := []string{""}
 	if assetType == "icon" || isIconDownloadURL(downloadLink) {
 		referers = []string{
+			"https://www.magnific.com/",
+			"https://www.magnific.com/icon/",
 			"https://www.freepik.com/",
 			"https://www.freepik.com/icon/",
 			"https://www.flaticon.com/",

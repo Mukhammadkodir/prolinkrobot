@@ -41,12 +41,17 @@ var legacyVideoLocaleMap = map[string]string{
 }
 
 var (
-	freepikAuthRefreshURL        = "https://www.freepik.com/"
+	freepikAuthRefreshURL        = "https://www.magnific.com/"
 	freepikSecureTokenRefreshURL = "https://securetoken.googleapis.com/v1/token"
 	freepikAuthRefreshMu         sync.Mutex
 	freepikAuthClient            = &http.Client{Timeout: 30 * time.Second}
 	freepikSecureTokenClient     = &http.Client{Timeout: 30 * time.Second}
 )
+
+var supportedAssetDomains = []string{
+	"magnific.com",
+	"freepik.com",
+}
 
 type endpointCandidate struct {
 	label string
@@ -54,8 +59,9 @@ type endpointCandidate struct {
 }
 
 type assetPageData struct {
-	Icon  *iconPageData
-	Video *videoPageData
+	Icon        *iconPageData
+	Video       *videoPageData
+	RegularType string
 }
 
 type iconPageData struct {
@@ -130,6 +136,14 @@ func GetPathFreepik(link string) string {
 		return ""
 	}
 	return parts[0]
+}
+
+func IsSupportedAssetURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return isSupportedAssetHost(u.Hostname())
 }
 
 func GetLanguageFreepik(link string) string {
@@ -442,8 +456,8 @@ func normalizeFreepikURL(link string) (*url.URL, error) {
 		}
 	}
 
-	if !strings.Contains(u.Hostname(), "freepik.com") {
-		return nil, errs.New("please send a freepik.com link")
+	if !isSupportedAssetHost(u.Hostname()) {
+		return nil, errs.New("please send a magnific.com or freepik.com link")
 	}
 
 	if u.Scheme == "" {
@@ -490,7 +504,13 @@ func buildDownloadEndpoints(u *url.URL, resourceID string, pageData *assetPageDa
 	base := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 	path := strings.ToLower(u.Path)
 	locale := GetLanguageFreepik(u.String())
-	regularType := regularResourceType(path)
+	regularType := ""
+	if pageData != nil {
+		regularType = strings.TrimSpace(pageData.RegularType)
+	}
+	if regularType == "" {
+		regularType = regularResourceType(path)
+	}
 
 	switch {
 	case isVideoPath(path):
@@ -562,7 +582,7 @@ func regularResourceType(path string) string {
 	case strings.Contains(path, "vector"), strings.Contains(path, "vecteur"), strings.Contains(path, "vectorial"):
 		return "vector"
 	case strings.Contains(path, "ai-image"):
-		return "ai-image"
+		return "ai"
 	default:
 		return ""
 	}
@@ -851,6 +871,7 @@ func fetchAssetPageData(client *http.Client, pageURL *url.URL, cookieHeader, coo
 					VideoSrc    string        `json:"videoSrc"`
 					Previews    []mediaURL    `json:"previews"`
 					Options     []videoOption `json:"options"`
+					RegularType string        `json:"regularType"`
 				} `json:"pageProps"`
 			} `json:"props"`
 		}
@@ -871,6 +892,7 @@ func fetchAssetPageData(client *http.Client, pageURL *url.URL, cookieHeader, coo
 					OptionIDs:   nil,
 				}
 			}
+			data.RegularType = strings.TrimSpace(pageProps.RegularType)
 		}
 	}
 
@@ -1524,9 +1546,7 @@ func getDownloadLinkFreepikVideoWithOptionIDs(client *http.Client, normalized *u
 	if normalized.Host != "" {
 		hosts = append(hosts, normalized.Host)
 	}
-	if normalized.Host != "www.freepik.com" {
-		hosts = append(hosts, "www.freepik.com")
-	}
+	hosts = append(hosts, defaultAssetHosts()...)
 	hosts = appendUniqueStrings(nil, hosts...)
 
 	orientation := ""
@@ -2018,7 +2038,7 @@ func looksLikeDownloadURL(raw string) bool {
 		return true
 	case strings.Contains(host, "flaticon.com") && hasDownloadableExtension(urlPath):
 		return true
-	case strings.Contains(host, "freepik.com") && strings.Contains(urlPath, "/download/"):
+	case isSupportedAssetHost(host) && strings.Contains(urlPath, "/download/"):
 		return true
 	}
 
@@ -2042,11 +2062,54 @@ func isActualVideoDownloadURL(raw string) bool {
 		return isDownloadableVideoExtension(ext)
 	case strings.Contains(host, "gettyimages.com"):
 		return strings.Contains(urlPath, "/downloads/")
-	case strings.Contains(host, "freepik.com") && strings.Contains(urlPath, "/download/"):
+	case isSupportedAssetHost(host) && strings.Contains(urlPath, "/download/"):
 		return true
 	default:
 		return false
 	}
+}
+
+func isSupportedAssetHost(host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, domain := range supportedAssetDomains {
+		if host == domain || strings.HasSuffix(host, "."+domain) {
+			return true
+		}
+	}
+	return false
+}
+
+func primaryAssetBaseURL() string {
+	raw := strings.TrimSpace(os.Getenv("FREEPIK_SITE_BASE_URL"))
+	if raw == "" {
+		raw = freepikAuthRefreshURL
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Host == "" {
+		return "https://www.magnific.com/"
+	}
+	parsed.Path = "/"
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed.String()
+}
+
+func primaryAssetHost() string {
+	parsed, err := url.Parse(primaryAssetBaseURL())
+	if err != nil {
+		return "www.magnific.com"
+	}
+	return parsed.Host
+}
+
+func defaultAssetHosts() []string {
+	return appendUniqueStrings(nil, primaryAssetHost(), "www.magnific.com", "www.freepik.com")
 }
 
 func effectiveDownloadExtension(parsed *url.URL) string {

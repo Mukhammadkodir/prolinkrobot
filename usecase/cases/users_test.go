@@ -11,6 +11,15 @@ func TestDetectAssetTypeMotionGraphics(t *testing.T) {
 	}
 }
 
+func TestDetectAssetTypeMagnificAIImage(t *testing.T) {
+	usecase := &UsecaseUsers{}
+
+	got := usecase.DetectAssetType("https://www.magnific.com/premium-ai-image/example_123.htm")
+	if got != "image" {
+		t.Fatalf("expected image, got %q", got)
+	}
+}
+
 func TestIsSupportedAssetTypeVideo(t *testing.T) {
 	usecase := &UsecaseUsers{}
 

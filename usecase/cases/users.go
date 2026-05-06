@@ -79,13 +79,13 @@ func (u *UsecaseUsers) ExtractFreepikURL(text string) string {
 	matches := freepikURLRegex.FindAllString(text, -1)
 	for _, match := range matches {
 		candidate := cleanupURL(match)
-		if strings.Contains(strings.ToLower(candidate), "freepik.com") {
+		if helper.IsSupportedAssetURL(candidate) {
 			return candidate
 		}
 	}
 
 	candidate := cleanupURL(text)
-	if strings.Contains(strings.ToLower(candidate), "freepik.com") {
+	if helper.IsSupportedAssetURL(candidate) {
 		return candidate
 	}
 	return ""
@@ -118,6 +118,8 @@ func (u *UsecaseUsers) DetectAssetType(url string) string {
 		return "photo"
 	case strings.Contains(value, "/template/") || strings.Contains(value, "premium-template") || strings.Contains(value, "free-template"):
 		return "template"
+	case strings.Contains(value, "/ai-image/") || strings.Contains(value, "premium-ai-image") || strings.Contains(value, "free-ai-image"):
+		return "image"
 	case strings.Contains(value, "/mockup/") || strings.Contains(value, "premium-mockup") || strings.Contains(value, "free-mockup"):
 		return "mockup"
 	case strings.Contains(value, "/stock/"):

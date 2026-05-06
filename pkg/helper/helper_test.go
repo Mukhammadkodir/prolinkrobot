@@ -170,6 +170,31 @@ func TestBuildDownloadEndpointsPrioritizesLocaleForRegularAssets(t *testing.T) {
 	}
 }
 
+func TestNormalizeFreepikURLAcceptsMagnificDomain(t *testing.T) {
+	u, err := normalizeFreepikURL("https://www.magnific.com/premium-ai-image/example_123.htm")
+	if err != nil {
+		t.Fatalf("normalizeFreepikURL returned error: %v", err)
+	}
+	if u.Host != "www.magnific.com" {
+		t.Fatalf("unexpected host: %q", u.Host)
+	}
+}
+
+func TestBuildDownloadEndpointsUsesPageRegularTypeForMagnificAIImages(t *testing.T) {
+	u, err := url.Parse("https://www.magnific.com/premium-ai-image/example_403784880.htm")
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
+
+	got := buildDownloadEndpoints(u, "403784880", &assetPageData{RegularType: "ai"})
+	if len(got) == 0 {
+		t.Fatal("expected endpoints")
+	}
+	if !strings.Contains(got[0].url, "contentType=ai") {
+		t.Fatalf("expected regular type ai in first candidate, got %q", got[0].url)
+	}
+}
+
 func TestGetDownloadLinkFreepikVideoUsesDetailEndpoint(t *testing.T) {
 	client := &http.Client{
 		Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {

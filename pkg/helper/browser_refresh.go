@@ -75,13 +75,13 @@ func attemptBrowserRefresh(cookieMap map[string]string, seedCookies bool) (map[s
 		}))
 	}
 	tasks = append(tasks,
-		chromedp.Navigate("https://www.freepik.com/"),
+		chromedp.Navigate(primaryAssetBaseURL()),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Sleep(wait),
-		chromedp.Navigate("https://www.freepik.com/user/me"),
+		chromedp.Navigate(strings.TrimRight(primaryAssetBaseURL(), "/")+"/user/me"),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Sleep(wait),
-		chromedp.Navigate("https://www.freepik.com/icon/fire_785116"),
+		chromedp.Navigate(strings.TrimRight(primaryAssetBaseURL(), "/")+"/icon/fire_785116"),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.Sleep(wait/2),
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -97,8 +97,8 @@ func attemptBrowserRefresh(cookieMap map[string]string, seedCookies bool) (map[s
 		chromedp.Sleep(wait/2),
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			cookies, err := network.GetCookies().WithURLs([]string{
-				"https://www.freepik.com/",
-				"https://ru.freepik.com/",
+				primaryAssetBaseURL(),
+				strings.TrimRight(primaryAssetBaseURL(), "/") + "/ru/",
 			}).Do(ctx)
 			if err != nil {
 				return err
@@ -158,7 +158,7 @@ func browserCookieParams(cookieMap map[string]string) []*network.CookieParam {
 		params = append(params, &network.CookieParam{
 			Name:  key,
 			Value: value,
-			URL:   "https://www.freepik.com/",
+			URL:   primaryAssetBaseURL(),
 		})
 	}
 	return params
